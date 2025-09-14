@@ -9,85 +9,109 @@ A lean Python pipeline that:
 
 > Example target ToC rows (from the spec):  
 > `1 Overview` … `1.2 Purpose` … `10 Power Rules`
+>
+> 
 
-
+##Features:
+- **ToC Extraction** → Section id, title, page, hierarchy (level, parent_id, full_path, doc_title)
+- **Chunking** → Split document into logical sections
+- **Validation** → Compare parsed chunks vs ToC
+- **Metrics** → Compute statistics (sections, figures, tables)
+- **Graph Export** → ToC hierarchy graph (JSON)
+- **Knowledge Graph** → Extract subject–relation–object triples
+- **Final Report** → Combined validation + metrics (JSONL)
 
 ---
 
-## Setup
+## Setup and Installation:
 
-1. Clone and create environment:
 ```bash
-git clone <repo-url>
+git clone https://github.com/yourusername/PDFParser.git
 cd PDFParser
 python -m venv .venv
-# macOS/Linux:
-source .venv/bin/activate
-# Windows:
-.venv\Scripts\activate
-```
-2. Install Dependency:
-```
+.venv\Scripts\activate   # Windows
+source .venv/bin/activate # Linux/Mac
 pip install -r requirements.txt
 ```
-3.Extract ToC → JSONL:
-```
-python -m src.run toc ^
-  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" ^
-  --out "data/output/usb_pd_spec.jsonl" ^
-  --doc-title "USB Power Delivery Specification, Rev 3.2, V1.1 (Oct 2024)"
-```
+One shot pipeline
+```python orchestrate.py --pdf "data/input/USB_PD.pdf" --outdir data/output```
 
-4.Chunk Full Document → JSONL
-```
-python -m src.run chunk ^
-  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" ^
-  --toc "data/output/usb_pd_spec.jsonl" ^
-  --out "data/output/chunks.jsonl"
-```
-Output format:
-```{
-  "section_path": "4.3.2 Device Role Swap Behavior",
-  "section_id": "4.3.2",
-  "title": "Device Role Swap Behavior",
-  "page_range": "47,49",
-  "content": "…",
-  "tables": [{"id":"4-12"}],
-  "figures": [{"id":"4-8"}]
-}
-```
-5.Validate ToC vs Chunks → JSON Report
-```
-python src/run.py validate \
+Step-by-Step:
+```# 1) Extract ToC
+python -m src.run toc --pdf "data/input/USB_PD.pdf" \
+  --out "data/output/usb_pd_spec.jsonl" \
+  --doc-title "Universal Serial Bus Power Delivery Specification" \
+  --strip-dot-leaders
+
+# 2) Chunk
+python -m src.run chunk --pdf "data/input/USB_PD.pdf" \
   --toc "data/output/usb_pd_spec.jsonl" \
+  --out "data/output/chunks.jsonl"
+
+# 3) Validate
+python -m src.run validate --toc "data/output/usb_pd_spec.jsonl" \
   --chunks "data/output/chunks.jsonl" \
-  --out "data/output/validation_report.json"
+  --out "data/output/validation.json"
+
+# 4) Metrics
+python -m src.run metrics --toc "data/output/usb_pd_spec.jsonl" \
+  --chunks "data/output/chunks.jsonl" \
+  --out "data/output/metrics.json"
+
+# 5) ToC Graph
+python -m src.run toc-graph --toc "data/output/usb_pd_spec.jsonl" \
+  --out "data/output/toc_graph.json"
+
+# 6) Knowledge Graph (Triples)
+python -m src.run kg --chunks "data/output/chunks.jsonl" \
+  --out "data/output/triples.jsonl"
+
+# 7) Final Report
+python -m src.run report --validation "data/output/validation.json" \
+  --metrics "data/output/metrics.json" \
+  --out "data/output/final_report.jsonl"
 ```
-Validation Report Schema:
+Output:
+```usb_pd_spec.jsonl → ToC entries
+
+chunks.jsonl → Document chunks
+
+validation.json → Validation report
+
+metrics.json → Metrics (sections, figures, tables)
+
+toc_graph.json → ToC as graph
+
+triples.jsonl → Extracted triples
+
+final_report.jsonl → Combined QA report
+
+```
+
+Example JSONL(ToC Row)
 ```{
-  "toc_section_count": 255,
-  "parsed_section_count": 254,
-  "missing_sections": ["10 Power Rules"],
-  "extra_sections": [],
-  "out_of_order_sections": [],
-  "matched_sections": ["1.1 Overview", "1.2 Purpose", "…"]
+  "doc_title": "USB Power Delivery Specification Rev X",
+  "section_id": "2.1.2",
+  "title": "Power Delivery Contract Negotiation",
+  "page": 53,
+  "level": 3,
+  "parent_id": "2.1",
+  "full_path": "2.1.2 Power Delivery Contract Negotiation"
 }
-
-
 ```
-Metrics:
-```{
-  "total_chapters": 10,
-  "total_sections": 255,
-  "total_figures": 534,
-  "total_tables": 568,
-  "avg_tokens_per_section": 894,
-  "sections_without_diagrams": ["1.1 Overview", "…"],
-  "sections_without_tables": ["…"],
-  "debug": {
-    "parsed_sections_from_chunks": 254,
-    "avg_words_per_section": 4198.27
-  }
+Sample Verified Output:
+```
+{
+  "summary": "Matched 62 of 63 ToC sections (98.4% match).",
+  "metrics": {
+    "toc_sections": 63,
+    "parsed_sections": 62,
+    "figures": 1376,
+    "tables": 0
+  },
+  "missing_sections": [
+    "10 Universal Serial Bus Power Delivery Specification, Revision 3.2, Version 1.1, 2024-10-09 Page"
+  ]
 }
 ```
 
@@ -111,20 +135,7 @@ PDFParser/
 └── README.md
 ```
 
-Sample Verified Output:
-```
-{
-  "summary": "Matched 62 of 63 ToC sections (98.4% match).",
-  "metrics": {
-    "toc_sections": 63,
-    "parsed_sections": 62,
-    "figures": 1376,
-    "tables": 0
-  },
-  "missing_sections": [
-    "10 Universal Serial Bus Power Delivery Specification, Revision 3.2, Version 1.1, 2024-10-09 Page"
-  ]
-}
+
 
 
 
