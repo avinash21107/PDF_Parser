@@ -1,0 +1,18 @@
+{
+  "summary": "Matched 254 of 255 ToC sections (99.6% match).",
+  "metrics": {
+    "toc_sections": 255,
+    "parsed_sections": 254,
+    "figures": 534,
+    "tables": 568,
+    "missing_sections": [
+      "10 UPnoivweresarl SReurilael sB , 3"
+    ]
+  },
+  "discrepancies": [
+    "Missing in chunks: 10 UPnoivweresarl SReurilael sB , 3"
+  ],
+  "recommendations": [
+    "Re-parse pages around missing sections; verify ToC page bounds and OCR."
+  ]
+}

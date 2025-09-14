@@ -1,0 +1,22 @@
+doc_title: "USB Power Delivery Specification, Rev 3.2, V1.1 (Oct 2024)"
+pdf_path: "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf"
+
+toc:
+  autodetect: true
+  pages: "13-18"     # used if autodetect: false
+  strip_dot_leaders: true
+  min_dots: 0        # 0 includes top-level (e.g., "2 Overview")
+
+chunking:
+  capture_tables_figures: true
+  heading_pattern: "^(\\d+(?:\\.\\d+)*)\\s+(.+)$"
+  min_heading_level: 1
+
+validation:
+  fuzzy_threshold: 0.90
+  prefer_section_id_match: true
+
+output:
+  toc_jsonl: "data/output/usb_pd_spec.jsonl"
+  chunks_jsonl: "data/output/chunks.jsonl"
+  validation_report: "data/output/validation_report.json"

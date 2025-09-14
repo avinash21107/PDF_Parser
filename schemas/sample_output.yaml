@@ -1,0 +1,32 @@
+doc_title: "USB Power Delivery Specification, Rev 3.2, V1.1 (Oct 2024)"
+
+toc:
+  - section_id: "2"
+    title: "Overview"
+    page: 53
+    level: 1
+    parent_id: null
+    full_path: "2 Overview"
+  - section_id: "2.1"
+    title: "Introduction"
+    page: 53
+    level: 2
+    parent_id: "2"
+    full_path: "2.1 Introduction"
+  - section_id: "2.1.2"
+    title: "Power Delivery Contract Negotiation"
+    page: 53
+    level: 3
+    parent_id: "2.1"
+    full_path: "2.1.2 Power Delivery Contract Negotiation"
+
+chunks:
+  - section_id: "2"
+    title: "Overview"
+    section_path: "2 Overview"
+    page_start: 53
+    page_end: 76
+    content: |
+      [trimmed content from pages 53–76...]
+    tables: []
+    figures: []
