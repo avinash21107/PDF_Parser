@@ -37,7 +37,8 @@ One shot pipeline
 ```python orchestrate.py --pdf "data/input/USB_PD.pdf" --outdir data/output```
 
 Step-by-Step:
-```# 1) Extract ToC
+```
+# 1) Extract ToC
 python -m src.run toc --pdf "data/input/USB_PD.pdf" \
   --out "data/output/usb_pd_spec.jsonl" \
   --doc-title "Universal Serial Bus Power Delivery Specification" \
@@ -72,19 +73,20 @@ python -m src.run report --validation "data/output/validation.json" \
   --out "data/output/final_report.jsonl"
 ```
 Output:
-```usb_pd_spec.jsonl → ToC entries
+```
+-usb_pd_spec.jsonl → ToC entries
 
-chunks.jsonl → Document chunks
+-chunks.jsonl → Document chunks
 
-validation.json → Validation report
+-validation.json → Validation report
 
-metrics.json → Metrics (sections, figures, tables)
+-metrics.json → Metrics (sections, figures, tables)
 
-toc_graph.json → ToC as graph
+-toc_graph.json → ToC as graph
 
-triples.jsonl → Extracted triples
+-triples.jsonl → Extracted triples
 
-final_report.jsonl → Combined QA report
+-final_report.jsonl → Combined QA report
 
 ```
 
@@ -134,6 +136,7 @@ PDFParser/
 ├── requirements.txt
 └── README.md
 ```
+
 
 
 
