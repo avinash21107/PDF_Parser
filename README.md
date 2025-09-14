@@ -32,18 +32,29 @@ pip install -r requirements.txt
 ```
 3.Extract ToC → JSONL:
 ```
-python src/run.py toc \
-  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" \
-  --out "data/output/usb_pd_spec.jsonl" \
+python -m src.run toc ^
+  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" ^
+  --out "data/output/usb_pd_spec.jsonl" ^
   --doc-title "USB Power Delivery Specification, Rev 3.2, V1.1 (Oct 2024)"
 ```
 
 4.Chunk Full Document → JSONL
 ```
-python src/run.py chunk \
-  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" \
-  --toc "data/output/usb_pd_spec.jsonl" \
+python -m src.run chunk ^
+  --pdf "data/input/USB_PD_R3_2 V1.1 2024-10 (1).pdf" ^
+  --toc "data/output/usb_pd_spec.jsonl" ^
   --out "data/output/chunks.jsonl"
+```
+Output format:
+```{
+  "section_path": "4.3.2 Device Role Swap Behavior",
+  "section_id": "4.3.2",
+  "title": "Device Role Swap Behavior",
+  "page_range": "47,49",
+  "content": "…",
+  "tables": [{"id":"4-12"}],
+  "figures": [{"id":"4-8"}]
+}
 ```
 5.Validate ToC vs Chunks → JSON Report
 ```
@@ -52,6 +63,34 @@ python src/run.py validate \
   --chunks "data/output/chunks.jsonl" \
   --out "data/output/validation_report.json"
 ```
+Validation Report Schema:
+```{
+  "toc_section_count": 255,
+  "parsed_section_count": 254,
+  "missing_sections": ["10 Power Rules"],
+  "extra_sections": [],
+  "out_of_order_sections": [],
+  "matched_sections": ["1.1 Overview", "1.2 Purpose", "…"]
+}
+
+
+```
+Metrics:
+```{
+  "total_chapters": 10,
+  "total_sections": 255,
+  "total_figures": 534,
+  "total_tables": 568,
+  "avg_tokens_per_section": 894,
+  "sections_without_diagrams": ["1.1 Overview", "…"],
+  "sections_without_tables": ["…"],
+  "debug": {
+    "parsed_sections_from_chunks": 254,
+    "avg_words_per_section": 4198.27
+  }
+}
+```
+
 Project Structure:
 ```
 PDFParser/
@@ -86,5 +125,6 @@ Sample Verified Output:
     "10 Universal Serial Bus Power Delivery Specification, Revision 3.2, Version 1.1, 2024-10-09 Page"
   ]
 }
+
 
 
