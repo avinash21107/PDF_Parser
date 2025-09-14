@@ -68,13 +68,20 @@ def cmd_chunk(args):
 
 
 def cmd_validate(args):
-    toc_entries = load_toc(args.toc)
+    toc = load_toc(args.toc)
     chunks = load_chunks(args.chunks)
+
+    fuzzy_threshold = getattr(args, "fuzzy_threshold", 0.90)
+    prefer_section_id = getattr(args, "prefer_section_id", True)
+
     missing, extra, out_of_order, matched = match_sections(
-        toc_entries, chunks, fuzzy_threshold=args.fuzzy_threshold, prefer_section_id=args.prefer_section_id
+        toc, chunks,
+        fuzzy_threshold=fuzzy_threshold,
+        prefer_section_id=prefer_section_id,
     )
+
     report = ValidationReport(
-        toc_section_count=len(toc_entries),
+        toc_section_count=len(toc),
         parsed_section_count=len(chunks),
         missing_sections=missing,
         extra_sections=extra,
@@ -82,8 +89,6 @@ def cmd_validate(args):
         matched_sections=matched,
     )
     write_report(args.out, report)
-    console.print(f"[green]Validation report → {args.out}")
-    console.print(f"[blue]Matched: {len(matched)} | Missing: {len(missing)} | Extra: {len(extra)}")
 
 
 def cmd_metrics(args):
