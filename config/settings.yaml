@@ -5,7 +5,7 @@ toc:
   autodetect: true
   pages: "13-18"     
   strip_dot_leaders: true
-  min_dots: 0        # 
+  min_dots: 0         
 
 chunking:
   capture_tables_figures: true
@@ -20,4 +20,5 @@ output:
   toc_jsonl: "data/output/usb_pd_spec.jsonl"
   chunks_jsonl: "data/output/chunks.jsonl"
   validation_report: "data/output/validation_report.json"
+
 
