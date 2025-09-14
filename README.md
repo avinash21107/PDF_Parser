@@ -1,13 +1,16 @@
 # USB PD Spec → ToC, Logical Chunking & Validation
 
 A lean Python pipeline that:
-- **Parses Table of Contents (ToC)** from the USB Power Delivery specification PDF  
-- **Logically chunks** the full document by numbered headings  
-- **Validates** ToC vs parsed chunks (missing/extra/misaligned)  
-- Produces outputs in **JSONL** (and a validation JSON report)
+- Parses Table of Contents (ToC) from the USB Power Delivery specification PDF
+- Logically chunks the full document by numbered headings
+- Detects figures/tables (robust captions: “Figure 5-1”, “Table 10-3”, multi-line)
+- Validates ToC vs parsed chunks (missing / extra / out-of-order)
+- Produces JSONL outputs (line-delimited JSON) + a validation JSON report
 
-This implements the assignment’s plan: libraries, implementation steps, and YAML/JSONL schemas.  
-Example ToC items we target exist in the PDF (e.g., *2 Overview*; *2.1.2 Power Delivery Contract Negotiation* on p.53).
+> Example target ToC rows (from the spec):  
+> `1 Overview` … `1.2 Purpose` … `10 Power Rules`
+
+
 
 ---
 
@@ -83,4 +86,5 @@ Sample Verified Output:
     "10 Universal Serial Bus Power Delivery Specification, Revision 3.2, Version 1.1, 2024-10-09 Page"
   ]
 }
+
 
