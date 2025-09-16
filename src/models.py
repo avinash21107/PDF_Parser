@@ -1,10 +1,10 @@
-from typing import Optional, List, Tuple
-from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 
 class Caption(BaseModel):
     id: str
-
+    name: Optional[str] = None
 
 
 class ToCEntry(BaseModel):
