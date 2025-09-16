@@ -4,8 +4,15 @@ from typing import List, Optional, Tuple
 import pdfplumber
 
 LIGATURES = {
-    "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
-    "–": "-", "—": "-", "·": ".", "•": ".",
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬀ": "ff",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    "–": "-",
+    "—": "-",
+    "·": ".",
+    "•": ".",
 }
 
 TOC_START_PAT = re.compile(r"\bTable Of Contents\b", re.IGNORECASE)
@@ -81,10 +88,6 @@ def extract_all_pages(pdf_path: str) -> List[Tuple[int, str]]:
 def looks_like_heading(num: str, title: str) -> bool:
     """
     Heuristics to avoid table rows and bit/hex dumps:
-    - reject top-level '0'
-    - title must contain letters
-    - letters must be at least as many as digits (avoid '0000 11110 hex data 0' style)
-    - title length >= 3
     """
     if num == "0":
         return False
@@ -92,7 +95,7 @@ def looks_like_heading(num: str, title: str) -> bool:
     if len(t) < 3:
         return False
     letters = sum(c.isalpha() for c in t)
-    digits  = sum(c.isdigit() for c in t)
+    digits = sum(c.isdigit() for c in t)
     if letters == 0:
         return False
     if digits > letters:
