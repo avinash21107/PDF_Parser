@@ -1,14 +1,23 @@
 import argparse
-import os , sys
+import os
 from rich.console import Console
-from src.utils import autodetect_toc_range, parse_page_range, extract_text_lines, extract_all_pages
-from src.toc import  parse_toc_lines as parse_toc, write_jsonl as write_toc_jsonl
-from src.chunk import  build_chunks, write_jsonl as write_chunks_jsonl,build_chunks_from_toc
+from src.utils import (
+    autodetect_toc_range,
+    parse_page_range,
+    extract_text_lines,
+    extract_all_pages,
+)
+from src.toc import parse_toc_lines as parse_toc, write_jsonl as write_toc_jsonl
+from src.chunk import (
+    build_chunks,
+    write_jsonl as write_chunks_jsonl,
+    build_chunks_from_toc,
+)
 from src.validate import load_toc, load_chunks, match_sections, write_report
 from src.models import ValidationReport
 from src.reports.metrics import compute_metrics, write_metrics
 from src.graph.toc_graph_simple import build_toc_graph, write_graph_json
-from src.graph.kg_simple import extract_triples, write_triples_jsonl
+from src.graph.kg_simple import extract_triples
 from src.reports.final_report import generate_final_report, write_final_report
 import json
 
@@ -23,17 +32,21 @@ def cmd_toc(args):
     else:
         rng = autodetect_toc_range(pdf)
         if not rng:
-            console.print("[red]Failed to autodetect ToC. Pass --toc-pages, e.g., 13-18.")
+            console.print(
+                "[red]Failed to autodetect ToC. Pass --toc-pages, e.g., 13-18."
+            )
             raise SystemExit(2)
         pstart, pend = rng
         console.log(f"[green]Auto-detected ToC pages: {pstart}-{pend}")
 
     lines = extract_text_lines(pdf, pstart, pend)
     entries = parse_toc(
-        lines, doc_title=doc_title, min_dots=args.min_dots, strip_dots=args.strip_dot_leaders
+        lines, doc_title=doc_title, min_dots=0, strip_dots=args.strip_dot_leaders
     )
     if not entries:
-        console.print("[red]No ToC entries parsed. Try --strip-dot-leaders and/or adjust --toc-pages.")
+        console.print(
+            "[red]No ToC entries parsed. Try --strip-dot-leaders and/or adjust --toc-pages."
+        )
         raise SystemExit(1)
     count = write_toc_jsonl(entries, args.out)
     console.print(f"[green]Wrote {count} ToC entries → {args.out}")
@@ -56,7 +69,9 @@ def cmd_chunk(args):
             toc_entries = [e for e in toc_entries if e.page > rng[1]]
             after = len(toc_entries)
             if after < before:
-                console.log(f"Filtered {before - after} ToC rows with page ≤ {rng[1]} (inside ToC)")
+                console.log(
+                    f"Filtered {before - after} ToC rows with page ≤ {rng[1]} (inside ToC)"
+                )
 
     if toc_entries:
         chunks = build_chunks_from_toc(pages, toc_entries, skip_pages=skip_pages)
@@ -75,7 +90,8 @@ def cmd_validate(args):
     prefer_section_id = getattr(args, "prefer_section_id", True)
 
     missing, extra, out_of_order, matched = match_sections(
-        toc, chunks,
+        toc,
+        chunks,
         fuzzy_threshold=fuzzy_threshold,
         prefer_section_id=prefer_section_id,
     )
@@ -99,22 +115,27 @@ def cmd_metrics(args):
     console.print(f"[green]Metrics → \n{os.path.abspath(args.out)}")
     console.print(m)
 
+
 def cmd_toc_graph(args):
     toc = load_toc(args.toc)
     G = build_toc_graph(toc)
     write_graph_json(args.out, G)
     console.print(f"[green]ToC graph → {os.path.abspath(args.out)}")
 
+
 def cmd_kg(args):
     chunks = load_chunks(args.chunks)
     triples = extract_triples(chunks, include_meta=False)  # strict 3-field triples
     if args.array:
         from src.graph.kg_simple import write_triples_json
+
         write_triples_json(args.out, triples)
     else:
         from src.graph.kg_simple import write_triples_jsonl
+
         write_triples_jsonl(args.out, triples)
     console.print(f"[green]Wrote triples → {os.path.abspath(args.out)}")
+
 
 def cmd_report(args):
     with open(args.validation, "r", encoding="utf-8") as f:
@@ -144,7 +165,9 @@ def main():
     a.add_argument("--pdf", required=True)
     a.add_argument("--out", required=True)
     a.add_argument("--doc-title", required=True)
-    a.add_argument("--toc-pages", help="Manual page range, e.g., 13-18 (1-based, inclusive)")
+    a.add_argument(
+        "--toc-pages", help="Manual page range, e.g., 13-18 (1-based, inclusive)"
+    )
     a.add_argument("--min-dots", type=int, default=0)
     a.add_argument("--strip-dot-leaders", action="store_true")
     a.set_defaults(func=cmd_toc)
@@ -152,7 +175,9 @@ def main():
     b = sub.add_parser("chunk", help="Chunk full PDF → JSONL")
     b.add_argument("--pdf", required=True, help="Path to USB PD PDF")
     b.add_argument("--out", required=True, help="Output JSONL path for chunks")
-    b.add_argument("--toc", help="(Optional) ToC JSONL path to gate headings by section_id")
+    b.add_argument(
+        "--toc", help="(Optional) ToC JSONL path to gate headings by section_id"
+    )
     b.set_defaults(func=cmd_chunk)
 
     c = sub.add_parser("validate", help="Validate ToC vs chunks → JSON")
@@ -177,10 +202,14 @@ def main():
     k = sub.add_parser("kg", help="Extract triples from chunks")
     k.add_argument("--chunks", required=True)
     k.add_argument("--out", required=True)
-    k.add_argument("--array", action="store_true", help="Write a single JSON array (not JSONL)")
+    k.add_argument(
+        "--array", action="store_true", help="Write a single JSON array (not JSONL)"
+    )
     k.set_defaults(func=cmd_kg)
 
-    r = sub.add_parser("report", help="Generate final QA report from validation + metrics")
+    r = sub.add_parser(
+        "report", help="Generate final QA report from validation + metrics"
+    )
     r.add_argument("--validation", required=True, help="Path to validation JSON")
     r.add_argument("--metrics", required=True, help="Path to metrics JSON")
     r.add_argument("--out", required=True)
