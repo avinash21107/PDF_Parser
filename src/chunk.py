@@ -4,18 +4,20 @@ import os
 from typing import List, Tuple, Optional, Set, Dict
 
 from src.models import Chunk, ToCEntry, Caption
-from src.utils import (extract_all_pages,normalize_text,strip_dot_leaders,HEADING_RE,looks_like_heading,
+from src.utils import (
+    normalize_text,
+    strip_dot_leaders,
+    HEADING_RE,
+    looks_like_heading,
 )
 
 
-SEP = r"[.\-\u2010\u2011\u2012\u2013\u2014\u2212]"
-ID = rf"(?:[A-Z]{{1,3}}{SEP})?\d+(?:{SEP}\d+)*(?:[a-z])?"
+SEP = r"[.\:\-\u2010\u2011\u2012\u2013\u2014\u2212]"
+ID = r"(?:(?:\d+|[A-Z])(?:\.\d+)*[a-z]?)"
+CAPTION_SEP = r"(?:\s*[:.\-–—]?\s*)"
 
-CAPTION_SEP = r"[:.,\-\u2010\u2011\u2012\u2013\u2014\u2212]?"
-
-FIGURE_RE = re.compile(rf"^\s*Figure\s*({ID})\s*{CAPTION_SEP}\s*(.+)?", re.IGNORECASE)
-TABLE_RE  = re.compile(rf"^\s*Table\s*({ID})\s*{CAPTION_SEP}\s*(.+)?", re.IGNORECASE)
-
+FIGURE_RE = re.compile(rf"\bFigure\s+({ID})\b", re.IGNORECASE)
+TABLE_RE = re.compile(rf"\bTable\s+({ID})\b", re.IGNORECASE)
 
 _CLEAN_TRAILING_PAGE = re.compile(r"[.·•]{2,}\s*\d+\s*$")
 PUNCT_RUN = re.compile(r"[.\u00B7•\u2022]{3,}")
@@ -27,11 +29,22 @@ TRAILING_LEADERS_PAGE = re.compile(r"(?:\s*[.\u00B7•\u2022]\s*){2,}\s*\d+\s*$"
 NBSP_FIX = re.compile(r"[\u00A0\u202F]")
 DASH_NORMALIZE = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 
+
 def norm_caption_line(s: str) -> str:
     s = NBSP_FIX.sub(" ", s)
     s = DASH_NORMALIZE.sub("-", s)
+    s = re.sub(r"(?i)\bT\s*a\s*b\s*l\s*e\b", "Table", s)
+    s = re.sub(r"(?i)\bF\s*i\s*g\s*u\s*r\s*e\b", "Figure", s)
+
+    s = re.sub(r"(?i)(\S)(?=Table)", r"\1 ", s)
+    s = re.sub(r"(?i)(\S)(?=Figure)", r"\1 ", s)
+
+    s = re.sub(r"(?i)(Table)(?=(?:\s*[A-Z]\.)|\s*\d)", r"\1 ", s)
+    s = re.sub(r"(?i)(Figure)(?=(?:\s*[A-Z]\.)|\s*\d)", r"\1 ", s)
+
     s = re.sub(r"\s{2,}", " ", s).strip()
     return s
+
 
 def looks_like_running_header_noisy(s: str) -> bool:
     norm = re.sub(r"[\s.\-·•_]", "", s).lower()
@@ -41,9 +54,11 @@ def looks_like_running_header_noisy(s: str) -> bool:
         or "version11" in norm
     )
 
+
 _DEHYPHEN = re.compile(r"(\S)-\n([a-z])")
 _DEHYPHEN_GENERIC = re.compile(r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)")
 _MULTI_NL = re.compile(r"\n{3,}")
+
 
 def clean_content(text: str) -> str:
     if not text:
@@ -70,6 +85,7 @@ def clean_content(text: str) -> str:
     text = _MULTI_NL.sub("\n\n", text)
     return text.strip()
 
+
 def clean_heading_title(title: str) -> str:
     t = strip_dot_leaders(title).strip()
     t = _CLEAN_TRAILING_PAGE.sub("", t).strip()
@@ -87,34 +103,14 @@ def enrich_with_figures_tables(chunks: List[Chunk]) -> None:
             continue
 
         lines = ch.content.splitlines()
-        n = len(lines)
-
-        def collect_following_caption(start_idx: int) -> str:
-            buff, i = [], start_idx + 1
-            while i < n:
-                nxt_raw = lines[i]
-                nxt = norm_caption_line(nxt_raw)
-                if not nxt:
-                    break
-                # stop on a new heading or another caption
-                if re.match(r"^\d+(?:\.\d+)*\s+\S", nxt):
-                    break
-                if FIGURE_RE.match(nxt) or TABLE_RE.match(nxt):
-                    break
-                buff.append(nxt)
-                i += 1
-            return " ".join(buff).strip()
-
         for idx, line in enumerate(lines):
             ln = norm_caption_line(line)
 
-            m = FIGURE_RE.match(ln)
-            if m:
+            if m := FIGURE_RE.search(ln):
                 ch.figures.append(Caption(id=m.group(1)))
                 continue
 
-            m = TABLE_RE.match(ln)
-            if m:
+            if m := TABLE_RE.search(ln):
                 ch.tables.append(Caption(id=m.group(1)))
 
 
@@ -170,6 +166,7 @@ def detect_headings(
             heads.append((pno, num, title))
     return heads
 
+
 def build_chunks_from_toc(
     pages: List[Tuple[int, str]],
     toc_entries: List[ToCEntry],
@@ -200,6 +197,9 @@ def build_chunks_from_toc(
         content_lines = []
         for line in raw.splitlines():
             s = line.strip()
+            if re.search(r"\b(Table|Figure)\b", s, re.IGNORECASE):
+                content_lines.append(line)
+                continue
             if re.match(r"^\d+(?:\.\d+)*\s+.+", s):
                 continue  # drop numbered headings
             if re.search(r"Universal Serial Bus Power Delivery Specification", s, re.I):
@@ -229,13 +229,16 @@ def build_chunks_from_toc(
 
     return chunks
 
+
 def build_chunks(
     pages: List[Tuple[int, str]],
     toc_ids: Optional[Set[str]] = None,
     skip_pages: Optional[Set[int]] = None,
     toc_map: Optional[Dict[str, str]] = None,
 ) -> List[Chunk]:
-    heads = detect_headings(pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map)
+    heads = detect_headings(
+        pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map
+    )
     if not heads:
         return []
 
@@ -260,6 +263,9 @@ def build_chunks(
         content_lines = []
         for line in raw.splitlines():
             s = line.strip()
+            if re.search(r"\b(Table|Figure)\b", s, re.IGNORECASE):
+                content_lines.append(line)
+                continue
             if re.match(r"^\d+(?:\.\d+)*\s+.+", s):
                 continue
             if re.search(r"Universal Serial Bus Power Delivery Specification", s, re.I):
@@ -281,7 +287,6 @@ def build_chunks(
                 figures=[],
             )
         )
-
 
     enrich_with_figures_tables(chunks)
 
@@ -306,7 +311,6 @@ def normalize_sentences(text: str) -> str:
     s = re.sub(r"\s+([,.])", r"\1", s)
     s = re.sub(r"\s{2,}", " ", s)
     return s.strip()
-
 
 
 def write_jsonl(chunks: List[Chunk], out_path: str) -> int:
