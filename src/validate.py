@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from Levenshtein import ratio as lev_ratio
 from rich.console import Console
@@ -111,7 +111,9 @@ class Validator:
                 ):
                     items.append(Chunk.model_validate(obj))
                 else:
-                    items.append(Chunk.model_validate(self._coerce_export_record_to_chunk(obj)))
+                    items.append(
+                        Chunk.model_validate(self._coerce_export_record_to_chunk(obj))
+                    )
         LOG.info("Loaded %d chunks from %s", len(items), path)
         return items
 
@@ -133,7 +135,9 @@ class Validator:
         return section_path, section_id, title, page_range, content
 
     def _coerce_export_record_to_chunk(self, obj: dict) -> Chunk:
-        section_path, section_id, title, page_range, content = self._extract_chunk_info(obj)
+        section_path, section_id, title, page_range, content = self._extract_chunk_info(
+            obj
+        )
 
         def _to_captions(items, rx):
             caps: list[Caption] = []
@@ -193,9 +197,12 @@ class Validator:
         prefer_section_id: bool = True,
     ) -> Tuple[List[str], List[str], List[str], List[str]]:
 
-
-        chunk_by_id = {norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id}
-        chunk_titles = [(i, c, clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)]
+        chunk_by_id = {
+            norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id
+        }
+        chunk_titles = [
+            (i, c, clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)
+        ]
         used_chunk_idxs: set[int] = set()
         matched_labels: list[str] = []
         matched_idx: list[Optional[int]] = []
@@ -205,8 +212,13 @@ class Validator:
             tid = norm_id(t.section_id)
             ttitle_clean = clean_toc_title(t.title)
             chunk_i = self._find_matching_chunk(
-                tid, ttitle_clean, chunk_by_id, chunk_titles, used_chunk_idxs,
-                prefer_section_id, fuzzy_threshold
+                tid,
+                ttitle_clean,
+                chunk_by_id,
+                chunk_titles,
+                used_chunk_idxs,
+                prefer_section_id,
+                fuzzy_threshold,
             )
             if chunk_i is not None:
                 used_chunk_idxs.add(chunk_i)
@@ -218,7 +230,8 @@ class Validator:
 
         extra_labels = [
             f"{c.section_id} {clean_toc_title(c.title)}"
-            for i, c in enumerate(chunks) if i not in used_chunk_idxs
+            for i, c in enumerate(chunks)
+            if i not in used_chunk_idxs
         ]
 
         out_of_order_labels: list[str] = []
@@ -232,7 +245,10 @@ class Validator:
 
         LOG.info(
             "Matching results: %d missing, %d extra, %d out-of-order, %d matched",
-            len(missing_labels), len(extra_labels), len(out_of_order_labels), len(matched_labels)
+            len(missing_labels),
+            len(extra_labels),
+            len(out_of_order_labels),
+            len(matched_labels),
         )
         return missing_labels, extra_labels, out_of_order_labels, matched_labels
 
@@ -265,14 +281,18 @@ class Validator:
 
 _validator = Validator()
 
+
 def load_toc(path: str):
     return _validator.load_toc(path)
+
 
 def load_chunks(path: str):
     return _validator.load_chunks(path)
 
+
 def match_sections(toc, chunks, fuzzy_threshold=0.90, prefer_section_id=True):
     return _validator.match_sections(toc, chunks, fuzzy_threshold, prefer_section_id)
+
 
 def write_report(out_path, report):
     return _validator.write_report(out_path, report)
