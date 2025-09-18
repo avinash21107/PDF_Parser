@@ -157,7 +157,8 @@ class Orchestrator:
             )
 
     def run_toc(
-        self, pdf: str, toc_pages: Optional[str], doc_title: str, out_path: str) -> None:
+        self, pdf: str, toc_pages: Optional[str], doc_title: str, out_path: str
+    ) -> None:
         ns = SimpleNamespace(
             pdf=pdf,
             toc_pages=toc_pages,
@@ -301,7 +302,8 @@ class Orchestrator:
                 _autofit(wb[name])
 
     def run_all(
-        self, pdf: str, doc_title: str, outdir: str, toc_pages: Optional[str] = None) -> Tuple[str, str, str]:
+        self, pdf: str, doc_title: str, outdir: str, toc_pages: Optional[str] = None
+    ) -> Tuple[str, str, str]:
 
         os.makedirs(outdir, exist_ok=True)
         toc_path = os.path.join(outdir, "usb_pd_toc.jsonl")
