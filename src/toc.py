@@ -25,7 +25,10 @@ _CLEAN_TRAILING_DOTS = re.compile(r"[.·•]{2,}\s*$")
 NBSP_RX = re.compile(r"[\u00A0\u202F]")
 DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 ISOLATED_LETTERS_RUN_RX = re.compile(r"(?:\b[A-Za-z]\b[.\s]*){6,}")
-FOOTER_BRAND_RX = re.compile(r"Universal\s+Serial\s+Bus\s+Power\s+Delivery\s+Specification.*?(Revision|Version).*$",re.IGNORECASE,)
+FOOTER_BRAND_RX = re.compile(
+    r"Universal\s+Serial\s+Bus\s+Power\s+Delivery\s+Specification.*?(Revision|Version).*$",
+    re.IGNORECASE,
+)
 MULTI_SPACE_RE = re.compile(r"\s{2,}")
 FOOTER_PAGE_RX = re.compile(r"\bPage\s*\d+\b", re.IGNORECASE)
 
@@ -81,7 +84,6 @@ def _clean_title_after_match(raw_title: str) -> str:
         t = m.group("title").strip()
     t = MULTI_SPACE_RE.sub(" ", t).strip()
     return t
-
 
 
 def clean_toc_title(title: str) -> str:
@@ -153,15 +155,15 @@ class ToCParser:
     """
 
     def __init__(self) -> None:
-    # No initialization needed; all attributes are set dynamically or via other methods
+        # No initialization needed; all attributes are set dynamically or via other methods
         pass
 
     def parse_lines(
-            self,
-            lines: Iterable[str],
-            doc_title: str,
-            min_dots: int = 0,
-            strip_dots: bool = False,
+        self,
+        lines: Iterable[str],
+        doc_title: str,
+        min_dots: int = 0,
+        strip_dots: bool = False,
     ) -> List[ToCEntry]:
 
         def _preprocess_toc_line(s: str) -> str:
@@ -184,7 +186,9 @@ class ToCParser:
 
         def _is_toc_line(s: str) -> bool:
             s_low = s.lower()
-            return not s_low.startswith(("table of contents", "list of figures", "list of tables"))
+            return not s_low.startswith(
+                ("table of contents", "list of figures", "list of tables")
+            )
 
         def _should_include_section(section_id: str) -> bool:
             return _is_appendix(section_id) or section_id.count(".") >= min_dots
@@ -238,8 +242,7 @@ def parse_toc_lines(
         )
     except Exception as e:
         LOG.error(
-            "parse_toc_lines failed for doc_title='%s': %s",
-            doc_title, e, exc_info=True
+            "parse_toc_lines failed for doc_title='%s': %s", doc_title, e, exc_info=True
         )
         return []
 
