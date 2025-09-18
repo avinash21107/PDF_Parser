@@ -10,7 +10,9 @@ from ..models import ValidationReport
 LOG = get_logger(__name__)
 
 
-def generate_final_report(val: ValidationReport, metrics: Dict[str, Any]) -> Dict[str, Any]:
+def generate_final_report(
+    val: ValidationReport, metrics: Dict[str, Any]
+) -> Dict[str, Any]:
 
     matched = len(val.matched_sections)
     total = val.toc_section_count
@@ -26,15 +28,23 @@ def generate_final_report(val: ValidationReport, metrics: Dict[str, Any]) -> Dic
 
     recs: List[str] = []
     if val.missing_sections:
-        recs.append("Re-parse pages around missing sections; verify ToC page bounds and OCR.")
+        recs.append(
+            "Re-parse pages around missing sections; verify ToC page bounds and OCR."
+        )
     if val.extra_sections:
         recs.append("Tighten heading detector or gate strictly by ToC IDs.")
     if metrics.get("total_figures", 0) == 0 and metrics.get("total_tables", 0) == 0:
-        recs.append("Figure/Table captions may be missed—relax caption regex or post-OCR cleanup.")
+        recs.append(
+            "Figure/Table captions may be missed—relax caption regex or post-OCR cleanup."
+        )
     if metrics.get("avg_tokens_per_section", 0) < 300:
-        recs.append("Many short chunks detected; consider merging consecutive small sections.")
+        recs.append(
+            "Many short chunks detected; consider merging consecutive small sections."
+        )
     if metrics.get("avg_tokens_per_section", 0) > 9000:
-        recs.append("Very large chunks; consider splitting by subheadings or page breaks.")
+        recs.append(
+            "Very large chunks; consider splitting by subheadings or page breaks."
+        )
 
     report: Dict[str, Any] = {
         "summary": f"Matched {matched} of {total} ToC sections ({pct}% match).",
