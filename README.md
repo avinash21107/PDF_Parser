@@ -12,9 +12,10 @@ A lean Python pipeline that:
 >
 > 
 
-##Features:
-- ** Table of Contents Parsing** – Extract and validate hierarchical ToC entries.
-- **Chunk Extraction ** – Break down PDF into text chunks with structure awareness.
+- ##Features:
+- **Table of Contents Parsing** – Extract and validate hierarchical ToC entries.
+
+- **Chunk Extraction** – Break down PDF into text chunks with structure awareness.
 
 - **Validation** – Match ToC with parsed sections and generate structured validation reports.
 
@@ -139,6 +140,7 @@ PDFParser/
 ├── requirements.txt
 └── README.md
 ```
+
 
 
 
