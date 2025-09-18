@@ -76,5 +76,3 @@ def write_graph_json(out_path: str, graph: Dict) -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(graph, f, ensure_ascii=False, indent=2)
     LOG.info("Wrote ToC graph to %s", out_path)
-
-
