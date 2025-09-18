@@ -12,18 +12,15 @@ A lean Python pipeline that:
 >
 > 
 
-- ##Features:
+ ##Features:
 - **Table of Contents Parsing** – Extract and validate hierarchical ToC entries.
 
 - **Chunk Extraction** – Break down PDF into text chunks with structure awareness.
 
 - **Validation** – Match ToC with parsed sections and generate structured validation reports.
 
-- **Triple Writing Utilities** – Save extracted triples in both .json and .jsonl formats.
-
 - **Error Handling** – Safe parsing with try/except blocks for reliability.
 
-- **OOP Design** – Refactored to follow classes, wrappers, and modular principles.
 
 ---
 
