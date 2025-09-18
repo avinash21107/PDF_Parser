@@ -132,11 +132,13 @@ PDFParser/
 │   ├── chunk.py            # Chunk extraction & figure/table detection
 │   ├── validate.py         # Validation scripts
 │   ├── reports/            # Metrics & report generation
-│   └── graph/              # ToC graph builder
+│   └── graph/
+|   └── loggers.py            # ToC graph builder
 │
 ├── requirements.txt
 └── README.md
 ```
+
 
 
 
