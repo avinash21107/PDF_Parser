@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -28,9 +27,14 @@ PARAM_PAT = re.compile(
     r"\s*(?:=|is|shall be|must be|should be|set to)\s*([^.;]+)",
     re.IGNORECASE,
 )
-CAP_PAT = re.compile(rf"\b({DEVICES})\b\s+(?:supports?|is capable of)\s+([^.;]+)", re.IGNORECASE)
+CAP_PAT = re.compile(
+    rf"\b({DEVICES})\b\s+(?:supports?|is capable of)\s+([^.;]+)", re.IGNORECASE
+)
 STATES = r"(?:Attach|Detach|Negotiation|Contract|Hard Reset|Soft Reset|PR_Swap|DR_Swap|FR_Swap|ErrorRecovery|Role\s*Swap)"
-STATE_PAT = re.compile(rf"\b({DEVICES})\b\s+(?:enters|transitions to|leaves|exits)\s+({STATES})\b", re.IGNORECASE)
+STATE_PAT = re.compile(
+    rf"\b({DEVICES})\b\s+(?:enters|transitions to|leaves|exits)\s+({STATES})\b",
+    re.IGNORECASE,
+)
 
 
 class TripleExtractor:
@@ -61,21 +65,33 @@ class TripleExtractor:
     def _extract_capabilities(self, text: str, ch: Chunk) -> List[Dict]:
         out: List[Dict] = []
         for m in CAP_PAT.finditer(text):
-            triple = {"subject": m.group(1), "relation": "supports", "object": m.group(2).strip()}
+            triple = {
+                "subject": m.group(1),
+                "relation": "supports",
+                "object": m.group(2).strip(),
+            }
             out.append(self._add_meta(triple, ch))
         return out
 
     def _extract_state_transitions(self, text: str, ch: Chunk) -> List[Dict]:
         out: List[Dict] = []
         for m in STATE_PAT.finditer(text):
-            triple = {"subject": m.group(1), "relation": "transitions_to", "object": m.group(2)}
+            triple = {
+                "subject": m.group(1),
+                "relation": "transitions_to",
+                "object": m.group(2),
+            }
             out.append(self._add_meta(triple, ch))
         return out
 
     def _extract_parameters(self, text: str, ch: Chunk) -> List[Dict]:
         out: List[Dict] = []
         for m in PARAM_PAT.finditer(text):
-            triple = {"subject": m.group(1), "relation": "equals", "object": m.group(2).strip()}
+            triple = {
+                "subject": m.group(1),
+                "relation": "equals",
+                "object": m.group(2).strip(),
+            }
             out.append(self._add_meta(triple, ch))
         return out
 
@@ -110,6 +126,7 @@ class TripleExtractor:
             triples.extend(self._extract_diagram_table_counts(ch))
         LOG.info("Extracted %d triples from %d chunks", len(triples), len(chunks))
         return triples
+
 
 class TripleWriter:
     """Write triples to JSONL/JSON files."""
