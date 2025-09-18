@@ -15,8 +15,12 @@ from src.utils import (
     parse_page_range,
 )
 from src.toc import parse_toc_lines as parse_toc, write_jsonl as write_toc_jsonl
-from src.chunk import (build_chunks,build_chunks_from_toc,write_jsonl as write_chunks_jsonl,)
-from src.validate import load_chunks,load_toc, match_sections, write_report
+from src.chunk import (
+    build_chunks,
+    build_chunks_from_toc,
+    write_jsonl as write_chunks_jsonl,
+)
+from src.validate import load_chunks, load_toc, match_sections, write_report
 from src.models import ValidationReport
 from src.reports.metrics import compute_metrics, write_metrics
 from src.graph.toc_graph_simple import TocGraphBuilder, write_graph_json
