@@ -13,13 +13,16 @@ A lean Python pipeline that:
 > 
 
 ##Features:
-- **ToC Extraction** → Section id, title, page, hierarchy (level, parent_id, full_path, doc_title)
-- **Chunking** → Split document into logical sections
-- **Validation** → Compare parsed chunks vs ToC
-- **Metrics** → Compute statistics (sections, figures, tables)
-- **Graph Export** → ToC hierarchy graph (JSON)
-- **Knowledge Graph** → Extract subject–relation–object triples
-- **Final Report** → Combined validation + metrics (JSONL)
+- ** Table of Contents Parsing** – Extract and validate hierarchical ToC entries.
+- **Chunk Extraction ** – Break down PDF into text chunks with structure awareness.
+
+- **Validation** – Match ToC with parsed sections and generate structured validation reports.
+
+- **Triple Writing Utilities** – Save extracted triples in both .json and .jsonl formats.
+
+- **Error Handling** – Safe parsing with try/except blocks for reliability.
+
+- **OOP Design** – Refactored to follow classes, wrappers, and modular principles.
 
 ---
 
@@ -136,6 +139,7 @@ PDFParser/
 ├── requirements.txt
 └── README.md
 ```
+
 
 
 
