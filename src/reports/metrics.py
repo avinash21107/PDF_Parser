@@ -20,7 +20,11 @@ class MetricsCalculator:
 
     @staticmethod
     def _avg_words(chunks: List[Chunk]) -> float:
-        words_per = [len((ch.content or "").split()) for ch in chunks if (ch.content or "").strip()]
+        words_per = [
+            len((ch.content or "").split())
+            for ch in chunks
+            if (ch.content or "").strip()
+        ]
         return mean(words_per) if words_per else 0.0
 
     @staticmethod
@@ -53,7 +57,9 @@ class MetricsCalculator:
         return bool(getattr(ch, "figures", None) or [])
 
     @staticmethod
-    def _chapter_bucket_from_fields(section_id: str, title: str = "", section_path: str = "") -> str | None:
+    def _chapter_bucket_from_fields(
+        section_id: str, title: str = "", section_path: str = ""
+    ) -> str | None:
 
         sid = (section_id or "").strip()
         ttl = (title or "").strip()
@@ -119,7 +125,9 @@ class MetricsCalculator:
         avg_tokens_per_section = self._approx_tokens_from_words(avg_words)
 
         sections_without_tables = [
-            f"{ch.section_id} {ch.title}".strip() for ch in chunks if not self._has_any_table(ch)
+            f"{ch.section_id} {ch.title}".strip()
+            for ch in chunks
+            if not self._has_any_table(ch)
         ]
         sections_without_diagrams = [
             f"{ch.section_id} {ch.title}".strip()
@@ -153,7 +161,9 @@ class MetricsCalculator:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
         LOG.info("Wrote metrics to %s", out_path)
 
+
 _calculator = MetricsCalculator()
+
 
 def compute_metrics(toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
     return _calculator.compute(toc, chunks)
