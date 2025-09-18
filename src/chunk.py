@@ -31,6 +31,7 @@ USB_SPEC_PATTERN = re.compile(
 )
 TABLE_FIGURE_LOOKAHEAD = r"(?=(?:\s*[A-Z]\.)|\s*\d)"
 
+
 class _Cleaner:
     """Encapsulate caption/line/content cleaning utilities."""
 
@@ -59,9 +60,10 @@ class _Cleaner:
             or "version11" in norm
         )
 
-
     _DEHYPHEN = re.compile(r"(\S)-\n([a-z])")
-    _DEHYPHEN_GENERIC = re.compile(r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)")
+    _DEHYPHEN_GENERIC = re.compile(
+        r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)"
+    )
     _MULTI_NL = re.compile(r"\n{3,}")
 
     @classmethod
@@ -204,7 +206,11 @@ class _ChunkBuilder:
         bounds = []
         for i, e in enumerate(entries_sorted):
             pstart = e.page
-            pend = entries_sorted[i + 1].page - 1 if i + 1 < len(entries_sorted) else last_pdf_page
+            pend = (
+                entries_sorted[i + 1].page - 1
+                if i + 1 < len(entries_sorted)
+                else last_pdf_page
+            )
             pend = max(pstart, pend)
             bounds.append((pstart, pend, e.section_id, e.title))
         return bounds
@@ -218,7 +224,9 @@ class _ChunkBuilder:
             return False
         if cls.FILTER_PATTERNS["usb_spec"].search(s):
             return False
-        if cls.FILTER_PATTERNS["page_number"].match(s) or cls.FILTER_PATTERNS["only_digits"].fullmatch(s):
+        if cls.FILTER_PATTERNS["page_number"].match(s) or cls.FILTER_PATTERNS[
+            "only_digits"
+        ].fullmatch(s):
             return False
         return True
 
@@ -237,7 +245,9 @@ class _ChunkBuilder:
             if p in skip_pages:
                 continue
             page_text = page_map.get(p, "")
-            lines.extend(line for line in page_text.splitlines() if cls._should_keep_line(line))
+            lines.extend(
+                line for line in page_text.splitlines() if cls._should_keep_line(line)
+            )
         content_clean = _Cleaner.clean_content("\n".join(lines))
         return Chunk(
             section_path=f"{sec} {title}",
@@ -262,7 +272,9 @@ class _ChunkBuilder:
         bounds = self._compute_toc_bounds(entries_sorted, last_pdf_page)
 
         chunks = [
-            self._build_chunk_from_bounds(pstart, pend, sec, title, page_map, skip_pages)
+            self._build_chunk_from_bounds(
+                pstart, pend, sec, title, page_map, skip_pages
+            )
             for pstart, pend, sec, title in bounds
         ]
 
@@ -274,10 +286,14 @@ class _ChunkBuilder:
         return chunks
 
     @staticmethod
-    def _compute_bounds(heads_sorted: List[Tuple[int, str, str]], last_page: int) -> List[Tuple[int, int, str, str]]:
+    def _compute_bounds(
+        heads_sorted: List[Tuple[int, str, str]], last_page: int
+    ) -> List[Tuple[int, int, str, str]]:
         bounds = []
         for i, (pno, sec, title) in enumerate(heads_sorted):
-            next_p = heads_sorted[i + 1][0] if i + 1 < len(heads_sorted) else last_page + 1
+            next_p = (
+                heads_sorted[i + 1][0] if i + 1 < len(heads_sorted) else last_page + 1
+            )
             bounds.append((pno, next_p - 1, sec, title))
         return bounds
 
@@ -309,7 +325,13 @@ class _ChunkBuilder:
             if skip_pages and p in skip_pages:
                 continue
             page_text = page_map.get(p, "")
-            lines.extend([line for line in page_text.splitlines() if cls._filter_content_line(line)])
+            lines.extend(
+                [
+                    line
+                    for line in page_text.splitlines()
+                    if cls._filter_content_line(line)
+                ]
+            )
 
         content_clean = _Cleaner.clean_content("\n".join(lines))
         return Chunk(
@@ -329,16 +351,23 @@ class _ChunkBuilder:
         skip_pages: Optional[Set[int]] = None,
         toc_map: Optional[Dict[str, str]] = None,
     ) -> List[Chunk]:
-        heads = _HeadingDetector().detect_headings(pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map)
+        heads = _HeadingDetector().detect_headings(
+            pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map
+        )
         if not heads:
             return []
 
         last_page = pages[-1][0]
-        heads_sorted = sorted(heads, key=lambda x: (tuple(map(int, x[1].split("."))), x[0]))
+        heads_sorted = sorted(
+            heads, key=lambda x: (tuple(map(int, x[1].split("."))), x[0])
+        )
         bounds = self._compute_bounds(heads_sorted, last_page)
 
         page_map = dict(pages)
-        chunks = [self._build_single_chunk(pstart, pend, sec, title, page_map, skip_pages) for pstart, pend, sec, title in bounds]
+        chunks = [
+            self._build_single_chunk(pstart, pend, sec, title, page_map, skip_pages)
+            for pstart, pend, sec, title in bounds
+        ]
 
         enrich_with_figures_tables(chunks)
 
@@ -379,9 +408,9 @@ _builder = _ChunkBuilder()
 _detector = _HeadingDetector()
 _cleaner = _Cleaner()
 
+
 def norm_caption_line(s: str) -> str:
     return _cleaner.norm_caption_line(s)
-
 
 
 def enrich_with_figures_tables(chunks: List[Chunk]) -> None:
@@ -400,14 +429,23 @@ def enrich_with_figures_tables(chunks: List[Chunk]) -> None:
                 ch.tables.append(Caption(id=m.group(1)))
 
 
-def build_chunks_from_toc(pages: List[Tuple[int, str]],toc_entries: List[ToCEntry],skip_pages: Optional[Set[int]] = None,) -> List[Chunk]:
+def build_chunks_from_toc(
+    pages: List[Tuple[int, str]],
+    toc_entries: List[ToCEntry],
+    skip_pages: Optional[Set[int]] = None,
+) -> List[Chunk]:
     return _builder.build_chunks_from_toc(pages, toc_entries, skip_pages=skip_pages)
 
 
-def build_chunks(pages: List[Tuple[int, str]],toc_ids: Optional[Set[str]] = None,skip_pages: Optional[Set[int]] = None,
+def build_chunks(
+    pages: List[Tuple[int, str]],
+    toc_ids: Optional[Set[str]] = None,
+    skip_pages: Optional[Set[int]] = None,
     toc_map: Optional[Dict[str, str]] = None,
 ) -> List[Chunk]:
-    return _builder.build_chunks(pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map)
+    return _builder.build_chunks(
+        pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map
+    )
 
 
 def normalize_sentences(text: str) -> str:
