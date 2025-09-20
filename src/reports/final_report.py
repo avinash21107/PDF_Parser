@@ -37,12 +37,13 @@ class FinalReport:
             json.dump(self.report, f, ensure_ascii=False, indent=2)
         LOG.info("Wrote final report to %s", out_path)
 
-
     def _compute_summary(self) -> None:
         matched = len(self.val.matched_sections)
         total = self.val.toc_section_count
         pct = round((matched / total * 100.0), 1) if total else 0.0
-        self.report["summary"] = f"Matched {matched} of {total} ToC sections ({pct}% match)."
+        self.report["summary"] = (
+            f"Matched {matched} of {total} ToC sections ({pct}% match)."
+        )
 
     def _collect_discrepancies(self) -> None:
         discrepancies: List[str] = []
@@ -70,7 +71,10 @@ class FinalReport:
             )
         if self.val.extra_sections:
             recs.append("Tighten heading detector or gate strictly by ToC IDs.")
-        if self.metrics.get("total_figures", 0) == 0 and self.metrics.get("total_tables", 0) == 0:
+        if (
+            self.metrics.get("total_figures", 0) == 0
+            and self.metrics.get("total_tables", 0) == 0
+        ):
             recs.append(
                 "Figure/Table captions may be missed—relax caption regex or post-OCR cleanup."
             )
@@ -84,4 +88,3 @@ class FinalReport:
                 "Very large chunks; consider splitting by subheadings or page breaks."
             )
         self.report["recommendations"] = recs
-
