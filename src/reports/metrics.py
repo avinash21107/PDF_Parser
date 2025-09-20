@@ -16,10 +16,19 @@ _ANY_INT_TOKEN_RX = re.compile(r"\b(\d{1,3})\b")
 
 
 class MetricsCalculator:
-    """Encapsulate metrics computation and IO for the reports.metrics module."""
+    """
+    Encapsulate metrics computation and IO.
 
-    @staticmethod
-    def _avg_words(chunks: List[Chunk]) -> float:
+    This class is intentionally lightweight and testable. You can inject alternative
+    regexes or token approximation strategies by subclassing or by overriding methods.
+    """
+
+    def __init__(self, token_word_ratio: float = 1.3) -> None:
+        # words -> approx tokens conversion uses a configurable ratio (words / ratio)
+        self.token_word_ratio = float(token_word_ratio)
+
+    def _avg_words(self, chunks: List[Chunk]) -> float:
+        """Average number of words per chunk (ignores blank contents)."""
         words_per = [
             len((ch.content or "").split())
             for ch in chunks
@@ -27,12 +36,16 @@ class MetricsCalculator:
         ]
         return mean(words_per) if words_per else 0.0
 
-    @staticmethod
-    def _approx_tokens_from_words(words: float) -> int:
-        return int(round(words / 1.3)) if words else 0
+    def _approx_tokens_from_words(self, words: float) -> int:
+        """Approximate token count from words using the configured ratio."""
+        if not words:
+            return 0
+        # compute float division explicitly then round to nearest int
+        approx = float(words) / self.token_word_ratio
+        return int(round(approx))
 
-    @staticmethod
-    def _figure_is_table(fig: Any) -> bool:
+    def _figure_is_table(self, fig: Any) -> bool:
+        """Return True if a 'figure' entry actually represents a table."""
         kind = getattr(fig, "kind", None) or getattr(fig, "type", None)
         if isinstance(kind, str) and kind.lower() == "table":
             return True
@@ -41,26 +54,28 @@ class MetricsCalculator:
             return isinstance(k, str) and k.lower() == "table"
         return False
 
-    @classmethod
-    def _count_tables_in_chunk(cls, ch: Chunk) -> int:
+    def _count_tables_in_chunk(self, ch: Chunk) -> int:
+        """Count tables in a chunk (tables list + figures that are tables)."""
         tables_count = len(getattr(ch, "tables", None) or [])
         figs = getattr(ch, "figures", None) or []
-        tables_count += sum(1 for f in figs if cls._figure_is_table(f))
+        tables_count += sum(1 for f in figs if self._figure_is_table(f))
         return tables_count
 
-    @classmethod
-    def _has_any_table(cls, ch: Chunk) -> bool:
-        return cls._count_tables_in_chunk(ch) > 0
+    def _has_any_table(self, ch: Chunk) -> bool:
+        return self._count_tables_in_chunk(ch) > 0
 
-    @staticmethod
-    def _has_any_figure(ch: Chunk) -> bool:
+    def _has_any_figure(self, ch: Chunk) -> bool:
         return bool(getattr(ch, "figures", None) or [])
 
-    @staticmethod
     def _chapter_bucket_from_fields(
-        section_id: str, title: str = "", section_path: str = ""
+        self, section_id: str, title: str = "", section_path: str = ""
     ) -> str | None:
-
+        """
+        Determine a numeric chapter bucket from fields by:
+         1. trying section_id header,
+         2. then title and section_path start,
+         3. then any small integer token within title/section_path.
+        """
         sid = (section_id or "").strip()
         ttl = (title or "").strip()
         sp = (section_path or "").strip()
@@ -82,7 +97,18 @@ class MetricsCalculator:
         return None
 
     def compute(self, toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
+        """
+        Compute a set of metrics summarizing the ToC and parsed chunks.
 
+        Returns a dictionary with keys:
+         - total_chapters
+         - total_sections
+         - total_figures
+         - total_tables
+         - avg_tokens_per_section
+         - sections_without_diagrams
+         - sections_without_tables
+        """
         LOG.debug("Computing metrics: %d ToC entries, %d chunks", len(toc), len(chunks))
 
         toc_chapters = sorted(
@@ -154,8 +180,8 @@ class MetricsCalculator:
         )
         return metrics
 
-    @staticmethod
-    def write(out_path: str, metrics: Dict[str, Any]) -> None:
+    def write(self, out_path: str, metrics: Dict[str, Any]) -> None:
+        """Write metrics JSON to disk (pretty-printed, UTF-8)."""
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
