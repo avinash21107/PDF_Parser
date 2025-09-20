@@ -11,6 +11,7 @@ LOG = get_logger(__name__)
 
 
 def _infer_parent(sec_id: str) -> Optional[str]:
+    """Infer parent section from dotted section numbering (e.g., 1.2 → 1)."""
     if "." not in sec_id:
         return None
     return ".".join(sec_id.split(".")[:-1]) or None
@@ -18,12 +19,12 @@ def _infer_parent(sec_id: str) -> Optional[str]:
 
 class TocGraphBuilder:
     """
-    Builds a simple directed graph from a list of ToCEntry objects.
+    Builds a directed graph from ToCEntry objects.
 
-    The graph has:
-    - nodes: sections with id, title, page, and level
+    Graph representation:
+    - nodes: sections with id, title, page, level
     - links: parent-child relationships inferred from explicit parent_id
-      or dotted section numbering (e.g., 1.2 → parent 1).
+             or dotted section numbering.
     """
 
     def __init__(self, toc: List[ToCEntry]) -> None:
@@ -31,7 +32,8 @@ class TocGraphBuilder:
         self.nodes: Dict[str, Dict] = {}
         self.links: List[Tuple[str, str]] = []
 
-    def build(self) -> Dict:
+    def build(self) -> Dict[str, object]:
+        """Construct the graph dictionary with nodes and links."""
         self._add_nodes()
         self._add_links()
         graph = {
@@ -48,7 +50,9 @@ class TocGraphBuilder:
         )
         return graph
 
+
     def _add_nodes(self) -> None:
+        """Add nodes for each ToCEntry."""
         for entry in self.toc:
             self.nodes[entry.section_id] = {
                 "id": entry.section_id,
@@ -58,6 +62,7 @@ class TocGraphBuilder:
             }
 
     def _add_links(self) -> None:
+        """Add parent-child links based on parent_id or inferred parent."""
         for entry in self.toc:
             parent = entry.parent_id or _infer_parent(entry.section_id)
             if parent:
@@ -71,8 +76,12 @@ class TocGraphBuilder:
                 self.links.append((parent, entry.section_id))
 
 
-def write_graph_json(out_path: str, graph: Dict) -> None:
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(graph, f, ensure_ascii=False, indent=2)
-    LOG.info("Wrote ToC graph to %s", out_path)
+class TocGraphWriter:
+    """Writes a ToC graph dictionary to JSON file."""
+
+    @staticmethod
+    def write_graph_json(out_path: str, graph: Dict[str, object]) -> None:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(graph, f, ensure_ascii=False, indent=2)
+        LOG.info("Wrote ToC graph to %s", out_path)
