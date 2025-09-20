@@ -10,63 +10,65 @@ from src.logger import get_logger
 
 LOG = get_logger(__name__)
 
-LIGATURES = {
-    "ﬁ": "fi",
-    "ﬂ": "fl",
-    "ﬀ": "ff",
-    "ﬃ": "ffi",
-    "ﬄ": "ffl",
-    "–": "-",
-    "—": "-",
-    "·": ".",
-    "•": ".",
-}
 
-TOC_START_PAT = re.compile(r"\bTable Of Contents\b", re.IGNORECASE)
-LIST_STOP_PAT = re.compile(r"\bList of (Figures|Tables)\b", re.IGNORECASE)
+class PDFUtils:
+    """Encapsulate PDF text normalization, ToC detection, and page extraction utilities."""
 
+    LIGATURES = {
+        "ﬁ": "fi",
+        "ﬂ": "fl",
+        "ﬀ": "ff",
+        "ﬃ": "ffi",
+        "ﬄ": "ffl",
+        "–": "-",
+        "—": "-",
+        "·": ".",
+        "•": ".",
+    }
 
-HEADING_RE = re.compile(r"^(?P<num>[1-9]\d*(?:\.\d+)*)\s+(?P<title>.+)$")
+    TOC_START_PAT = re.compile(r"\bTable Of Contents\b", re.IGNORECASE)
+    LIST_STOP_PAT = re.compile(r"\bList of (Figures|Tables)\b", re.IGNORECASE)
+    HEADING_RE = re.compile(r"^(?P<num>[1-9]\d*(?:\.\d+)*)\s+(?P<title>.+)$")
 
-
-class _PDFUtils:
-    """Encapsulate pdf text normalization and extraction utilities."""
+    DOT_LEADERS_RX = re.compile(r"\.{3,}")
 
     def __init__(self) -> None:
-        # keeps state-free; exists to group related helpers together
+        #
         pass
 
     def normalize_text(self, s: str) -> str:
-        if s is None:
+        """Replace ligatures and normalize spaces."""
+        if not s:
             return ""
-        for k, v in LIGATURES.items():
+        for k, v in self.LIGATURES.items():
             s = s.replace(k, v)
         s = re.sub(r"[ \t]+", " ", s)
         return s.strip()
 
     def strip_dot_leaders(self, s: str) -> str:
-        return re.sub(r"\.{3,}", " ", (s or ""))
+        """Remove ... sequences used as dot leaders in tables of contents."""
+        return self.DOT_LEADERS_RX.sub(" ", s or "")
 
     def autodetect_toc_range(self, pdf_path: str) -> Optional[Tuple[int, int]]:
+        """Detect start/end pages of the Table of Contents in a PDF."""
         LOG.debug("Autodetecting ToC range in %s", pdf_path)
         with pdfplumber.open(pdf_path) as pdf:
             n = len(pdf.pages)
-            search_limit = min(n, 30)
-            start: Optional[int] = None
-            for i in range(search_limit):
+            start = None
+            for i in range(min(n, 30)):
                 txt = pdf.pages[i].extract_text() or ""
-                if TOC_START_PAT.search(self.normalize_text(txt)):
-                    start = i + 1  # return 1-based page numbers
+                if self.TOC_START_PAT.search(self.normalize_text(txt)):
+                    start = i + 1  # 1-based page number
                     LOG.debug("Found ToC start marker on page %d", start)
                     break
             if start is None:
-                LOG.debug("No ToC start marker found in first %d pages", search_limit)
+                LOG.debug("No ToC start marker found in first 30 pages")
                 return None
 
-            end: Optional[int] = None
+            end = None
             for p in range(start + 1, min(start + 12, n) + 1):
                 txt = pdf.pages[p - 1].extract_text() or ""
-                if LIST_STOP_PAT.search(self.normalize_text(txt)):
+                if self.LIST_STOP_PAT.search(self.normalize_text(txt)):
                     end = p - 1
                     LOG.debug("Found ToC end marker near page %d -> end=%d", p, end)
                     break
@@ -75,15 +77,17 @@ class _PDFUtils:
                 end = min(start + 7, n)
                 LOG.debug("Defaulting ToC end to %d", end)
 
-            return (start, end)
+            return start, end
 
     def parse_page_range(self, s: str) -> Tuple[int, int]:
-        m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", (s or ""))
+        """Parse a string like '13-18' into a tuple of integers."""
+        m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", s or "")
         if not m:
             raise ValueError("Page range must be like '13-18'")
         return int(m.group(1)), int(m.group(2))
 
     def extract_text_lines(self, pdf_path: str, start: int, end: int) -> List[str]:
+        """Extract text lines from a PDF between start and end pages (inclusive)."""
         LOG.debug("Extracting text lines from %s pages %d-%d", pdf_path, start, end)
         lines: List[str] = []
         with pdfplumber.open(pdf_path) as pdf:
@@ -93,12 +97,12 @@ class _PDFUtils:
             for pno in range(start, end + 1):
                 page = pdf.pages[pno - 1]
                 txt = page.extract_text() or ""
-                for ln in io.StringIO(txt).read().splitlines():
-                    lines.append(ln)
+                lines.extend(io.StringIO(txt).read().splitlines())
         LOG.debug("Extracted %d lines from %s", len(lines), pdf_path)
         return lines
 
     def extract_all_pages(self, pdf_path: str) -> List[Tuple[int, str]]:
+        """Extract all pages from a PDF as a list of (page_number, text) tuples."""
         LOG.debug("Extracting all pages from %s", pdf_path)
         pages: List[Tuple[int, str]] = []
         with pdfplumber.open(pdf_path) as pdf:
@@ -109,6 +113,7 @@ class _PDFUtils:
         return pages
 
     def looks_like_heading(self, num: str, title: str) -> bool:
+        """Determine if a section number/title resembles a heading."""
         if num == "0":
             return False
         t = (title or "").strip()
@@ -116,16 +121,15 @@ class _PDFUtils:
             return False
         letters = sum(c.isalpha() for c in t)
         digits = sum(c.isdigit() for c in t)
-        if letters == 0:
+        if letters == 0 or digits > letters:
             return False
-        if digits > letters:
-            return False
-
         if re.search(r"\b[01]{4,}\b", t):
             return False
         return True
 
-_utils = _PDFUtils()
+
+_utils = PDFUtils()
+
 
 def normalize_text(s: str) -> str:
     try:
