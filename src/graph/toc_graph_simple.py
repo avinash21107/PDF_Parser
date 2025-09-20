@@ -50,7 +50,6 @@ class TocGraphBuilder:
         )
         return graph
 
-
     def _add_nodes(self) -> None:
         """Add nodes for each ToCEntry."""
         for entry in self.toc:
