@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import argparse
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 
@@ -27,27 +28,40 @@ from src.graph.toc_graph_simple import TocGraphBuilder, TocGraphWriter
 from src.graph.kg_simple import extract_triples
 from src.reports.final_report import FinalReport
 
-
 console = Console()
 LOG = get_logger(__name__)
 
 
-class TocCommand:
+class AbstractCommand(ABC):
+    """Abstract command contract for CLI commands."""
+
+    @abstractmethod
+    def run(self, args: argparse.Namespace) -> None:
+        raise NotImplementedError
+
+
+class TocCommand(AbstractCommand):
     def __init__(
         self,
-        extract_text_lines_fn=extract_text_lines,
-        autodetect_fn=autodetect_toc_range,
-        parse_toc_fn=parse_toc,
-        write_fn=write_toc_jsonl,
-        console_obj=console,
+        extract_text_lines_fn: Callable[..., list] = extract_text_lines,
+        autodetect_fn: Callable[..., Any] = autodetect_toc_range,
+        parse_toc_fn: Callable[..., list] = parse_toc,
+        write_fn: Callable[..., int] = write_toc_jsonl,
+        console_obj: Console = console,
         logger=LOG,
-    ):
+    ) -> None:
         self.extract_text_lines = extract_text_lines_fn
         self.autodetect = autodetect_fn
         self.parse_toc = parse_toc_fn
         self.write_toc = write_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "TocCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, TocCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         pdf = args.pdf
@@ -87,18 +101,18 @@ class TocCommand:
         self.log.info("Wrote %d ToC entries to %s", count, args.out)
 
 
-class ChunkCommand:
+class ChunkCommand(AbstractCommand):
     def __init__(
         self,
-        extract_all_pages_fn=extract_all_pages,
-        autodetect_fn=autodetect_toc_range,
-        load_toc_fn=load_toc,
-        build_chunks_fn=build_chunks,
-        build_chunks_from_toc_fn=build_chunks_from_toc,
-        write_chunks_fn=write_chunks_jsonl,
-        console_obj=console,
+        extract_all_pages_fn: Callable[..., list] = extract_all_pages,
+        autodetect_fn: Callable[..., Any] = autodetect_toc_range,
+        load_toc_fn: Callable[..., list] = load_toc,
+        build_chunks_fn: Callable[..., list] = build_chunks,
+        build_chunks_from_toc_fn: Callable[..., list] = build_chunks_from_toc,
+        write_chunks_fn: Callable[..., int] = write_chunks_jsonl,
+        console_obj: Console = console,
         logger=LOG,
-    ):
+    ) -> None:
         self.extract_all_pages = extract_all_pages_fn
         self.autodetect = autodetect_fn
         self.load_toc = load_toc_fn
@@ -107,6 +121,12 @@ class ChunkCommand:
         self.write_chunks = write_chunks_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "ChunkCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ChunkCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         pdf = args.pdf
@@ -153,22 +173,28 @@ class ChunkCommand:
         self.log.info("Wrote %d chunks to %s", count, args.out)
 
 
-class ValidateCommand:
+class ValidateCommand(AbstractCommand):
     def __init__(
         self,
-        load_toc_fn=load_toc,
-        load_chunks_fn=load_chunks,
-        match_sections_fn=match_sections,
-        write_report_fn=write_report,
-        console_obj=console,
+        load_toc_fn: Callable[..., list] = load_toc,
+        load_chunks_fn: Callable[..., list] = load_chunks,
+        match_sections_fn: Callable[..., tuple] = match_sections,
+        write_report_fn: Callable[..., None] = write_report,
+        console_obj: Console = console,
         logger=LOG,
-    ):
+    ) -> None:
         self.load_toc = load_toc_fn
         self.load_chunks = load_chunks_fn
         self.match_sections = match_sections_fn
         self.write_report = write_report_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "ValidateCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ValidateCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         toc = self.load_toc(args.toc)
@@ -201,22 +227,28 @@ class ValidateCommand:
         self.log.info("Wrote validation report to %s", args.out)
 
 
-class MetricsCommand:
+class MetricsCommand(AbstractCommand):
     def __init__(
         self,
-        load_toc_fn=load_toc,
-        load_chunks_fn=load_chunks,
-        compute_metrics_fn=compute_metrics,
-        write_metrics_fn=write_metrics,
-        console_obj=console,
+        load_toc_fn: Callable[..., list] = load_toc,
+        load_chunks_fn: Callable[..., list] = load_chunks,
+        compute_metrics_fn: Callable[..., dict] = compute_metrics,
+        write_metrics_fn: Callable[..., None] = write_metrics,
+        console_obj: Console = console,
         logger=LOG,
-    ):
+    ) -> None:
         self.load_toc = load_toc_fn
         self.load_chunks = load_chunks_fn
         self.compute_metrics = compute_metrics_fn
         self.write_metrics = write_metrics_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "MetricsCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MetricsCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         toc = self.load_toc(args.toc)
@@ -228,11 +260,22 @@ class MetricsCommand:
         self.log.info("Wrote metrics to %s", args.out)
 
 
-class TocGraphCommand:
-    def __init__(self, load_toc_fn=load_toc, console_obj=console, logger=LOG):
+class TocGraphCommand(AbstractCommand):
+    def __init__(
+        self,
+        load_toc_fn: Callable[..., list] = load_toc,
+        console_obj: Console = console,
+        logger=LOG,
+    ) -> None:
         self.load_toc = load_toc_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "TocGraphCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, TocGraphCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         toc = self.load_toc(args.toc)
@@ -242,11 +285,22 @@ class TocGraphCommand:
         self.log.info("Wrote ToC graph to %s", args.out)
 
 
-class KGCommand:
-    def __init__(self, load_chunks_fn=load_chunks, console_obj=console, logger=LOG):
+class KGCommand(AbstractCommand):
+    def __init__(
+        self,
+        load_chunks_fn: Callable[..., list] = load_chunks,
+        console_obj: Console = console,
+        logger=LOG,
+    ) -> None:
         self.load_chunks = load_chunks_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "KGCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, KGCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         chunks = self.load_chunks(args.chunks)
@@ -267,10 +321,16 @@ class KGCommand:
         self.log.info("Wrote triples to %s", args.out)
 
 
-class ReportCommand:
-    def __init__(self, console_obj=console, logger=LOG):
+class ReportCommand(AbstractCommand):
+    def __init__(self, console_obj: Console = console, logger=LOG) -> None:
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "ReportCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ReportCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         with open(args.validation, "r", encoding="utf-8") as f:
@@ -286,11 +346,22 @@ class ReportCommand:
         self.log.info("Wrote final report to %s", args.out)
 
 
-class GraphCommand:
-    def __init__(self, load_toc_fn=load_toc, console_obj=console, logger=LOG):
+class GraphCommand(AbstractCommand):
+    def __init__(
+        self,
+        load_toc_fn: Callable[..., list] = load_toc,
+        console_obj: Console = console,
+        logger=LOG,
+    ) -> None:
         self.load_toc = load_toc_fn
         self.console = console_obj
         self.log = logger
+
+    def __str__(self) -> str:
+        return "GraphCommand()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, GraphCommand)
 
     def run(self, args: argparse.Namespace) -> None:
         toc = self.load_toc(args.toc)
