@@ -77,7 +77,7 @@ class Cleaner(AbstractCleaner):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Cleaner):
             return NotImplemented
-        return True  # stateless equality; adapt if stateful
+        return True  
 
     def norm_caption_line(self, s: str) -> str:
         s = self.regex.NBSP_FIX.sub(" ", s)
@@ -439,3 +439,4 @@ def normalize_sentences(text: str) -> str:
 
 def write_jsonl(chunks: List[Chunk], out_path: str) -> int:
     return _builder.write_jsonl(chunks, out_path)
+
