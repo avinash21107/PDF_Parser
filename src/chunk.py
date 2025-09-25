@@ -1,10 +1,19 @@
 from __future__ import annotations
+
 import re
-import os
 import json
-from typing import List, Tuple, Optional, Set, Dict
+from pathlib import Path
+from typing import (
+    List,
+    Tuple,
+    Optional,
+    Set,
+    Dict,
+)
+
 from src.models import Chunk, ToCEntry, Caption
-from src.utils import normalize_text, strip_dot_leaders, looks_like_heading, PDFUtils
+from src.utils import normalize_text, strip_dot_leaders, looks_like_heading
+from abc import ABC, abstractmethod
 
 
 class PDFRegexes:
@@ -32,15 +41,48 @@ class PDFRegexes:
     TABLE_FIGURE_LOOKAHEAD = r"(?=(?:\s*[A-Z]\.)|\s*\d)"
 
 
-class Cleaner:
+class AbstractCleaner(ABC):
+    """Abstract contract for cleaning/normalization logic."""
+
+    @abstractmethod
+    def norm_caption_line(self, s: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def looks_like_running_header_noisy(self, s: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clean_content(self, text: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clean_heading_title(self, title: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def normalize_sentences(self, text: str) -> str:
+        raise NotImplementedError
+
+
+class Cleaner(AbstractCleaner):
     """Encapsulate all text cleaning utilities."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.regex = PDFRegexes()
+
+    def __str__(self) -> str:
+        return "Cleaner()"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Cleaner):
+            return NotImplemented
+        return True  # stateless equality; adapt if stateful
 
     def norm_caption_line(self, s: str) -> str:
         s = self.regex.NBSP_FIX.sub(" ", s)
         s = self.regex.DASH_NORMALIZE.sub("-", s)
+
         s = re.sub(r"(?i)\bT\s*a\s*b\s*l\s*e\b", "Table", s)
         s = re.sub(r"(?i)\bF\s*i\s*g\s*u\s*r\s*e\b", "Figure", s)
         s = re.sub(rf"(?i)(Table){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
@@ -99,7 +141,7 @@ class Cleaner:
 class HeadingDetector:
     """Encapsulate heading detection logic."""
 
-    def __init__(self, cleaner: Cleaner):
+    def __init__(self, cleaner: AbstractCleaner):
         self.cleaner = cleaner
         self.noise_patterns = [
             PDFRegexes.PUNCT_RUN,
@@ -107,6 +149,9 @@ class HeadingDetector:
             PDFRegexes.PAGE_NO_NOISY,
             PDFRegexes.USB_SPEC_PATTERN,
         ]
+
+    def __str__(self) -> str:
+        return f"HeadingDetector(cleaner={self.cleaner})"
 
     def _heading_is_noisy(self, line: str, title: str) -> bool:
         for pat in self.noise_patterns:
@@ -117,6 +162,7 @@ class HeadingDetector:
             return True
         if not re.search(r"[A-Za-z]", title):
             return True
+        # reuse existing heuristic
         if not looks_like_heading(num=title, title=title):
             return True
         return False
@@ -128,7 +174,7 @@ class HeadingDetector:
         toc_map: Optional[Dict[str, str]] = None,
     ) -> Optional[Tuple[str, str]]:
         s = normalize_text(line)
-        m = PDFUtils.HEADING_RE.match(s)
+        m = PDFRegexes.HEADING_RE.match(s)
         if not m:
             return None
         num, raw_title = m.group("num"), m.group("title").strip()
@@ -161,12 +207,46 @@ class HeadingDetector:
         return heads
 
 
-class ChunkBuilder:
+class AbstractChunkBuilder(ABC):
+    """Abstract contract for building chunks from pages/ToC."""
+
+    @abstractmethod
+    def build_chunks_from_toc(
+        self,
+        pages: List[Tuple[int, str]],
+        toc_entries: List[ToCEntry],
+        skip_pages: Optional[Set[int]] = None,
+    ) -> List[Chunk]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_chunks(
+        self,
+        pages: List[Tuple[int, str]],
+        toc_ids: Optional[Set[str]] = None,
+        skip_pages: Optional[Set[int]] = None,
+        toc_map: Optional[Dict[str, str]] = None,
+    ) -> List[Chunk]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def enrich_with_figures_tables(self, chunks: List[Chunk]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_jsonl(self, chunks: List[Chunk], out_path: str) -> int:
+        raise NotImplementedError
+
+
+class ChunkBuilder(AbstractChunkBuilder):
     """Encapsulate chunk building from TOC or headings."""
 
-    def __init__(self, cleaner: Cleaner, detector: HeadingDetector):
+    def __init__(self, cleaner: AbstractCleaner, detector: HeadingDetector):
         self.cleaner = cleaner
         self.detector = detector
+
+    def __str__(self) -> str:
+        return f"ChunkBuilder(cleaner={self.cleaner}, detector={self.detector})"
 
     def _filter_content_line(self, line: str) -> bool:
         s = line.strip()
@@ -224,8 +304,7 @@ class ChunkBuilder:
         entries_sorted = sorted(toc_entries, key=lambda e: e.page)
         last_pdf_page = pages[-1][0] if pages else 0
 
-        # Compute TOC bounds
-        bounds = []
+        bounds: List[Tuple[int, int, str, str]] = []
         for i, e in enumerate(entries_sorted):
             pstart = e.page
             pend = (
@@ -236,22 +315,16 @@ class ChunkBuilder:
             pend = max(pstart, pend)
             bounds.append((pstart, pend, e.section_id, e.title))
 
-        chunks = [
-            self._build_chunk(
-                [
-                    line
-                    for p in range(pstart, pend + 1)
-                    if p not in skip_pages
-                    for line in page_map.get(p, "").splitlines()
-                    if self._filter_content_line(line)
-                ],
-                sec,
-                title,
-                pstart,
-                pend,
-            )
-            for pstart, pend, sec, title in bounds
-        ]
+        chunks: List[Chunk] = []
+        for pstart, pend, sec, title in bounds:
+            lines = [
+                line
+                for p in range(pstart, pend + 1)
+                if p not in skip_pages
+                for line in page_map.get(p, "").splitlines()
+                if self._filter_content_line(line)
+            ]
+            chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
 
         self.enrich_with_figures_tables(chunks)
         for ch in chunks:
@@ -278,7 +351,7 @@ class ChunkBuilder:
             heads, key=lambda x: (tuple(map(int, x[1].split("."))), x[0])
         )
 
-        bounds = []
+        bounds: List[Tuple[int, int, str, str]] = []
         for i, (pno, sec, title) in enumerate(heads_sorted):
             next_p = (
                 heads_sorted[i + 1][0] if i + 1 < len(heads_sorted) else last_page + 1
@@ -286,22 +359,16 @@ class ChunkBuilder:
             bounds.append((pno, next_p - 1, sec, title))
 
         page_map = dict(pages)
-        chunks = [
-            self._build_chunk(
-                [
-                    line
-                    for p in range(pstart, pend + 1)
-                    if p not in skip_pages
-                    for line in page_map.get(p, "").splitlines()
-                    if self._filter_content_line(line)
-                ],
-                sec,
-                title,
-                pstart,
-                pend,
-            )
-            for pstart, pend, sec, title in bounds
-        ]
+        chunks: List[Chunk] = []
+        for pstart, pend, sec, title in bounds:
+            lines = [
+                line
+                for p in range(pstart, pend + 1)
+                if p not in skip_pages
+                for line in page_map.get(p, "").splitlines()
+                if self._filter_content_line(line)
+            ]
+            chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
 
         self.enrich_with_figures_tables(chunks)
         for ch in chunks:
@@ -310,17 +377,23 @@ class ChunkBuilder:
         return chunks
 
     def write_jsonl(self, chunks: List[Chunk], out_path: str) -> int:
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         count = 0
         with open(out_path, "w", encoding="utf-8") as f:
             for c in chunks:
+                pr_list = []
+                try:
+                    pr_list = [int(x) for x in c.page_range.split(",")]
+                except Exception:
+                    # fallback: leave empty list
+                    pr_list = []
                 obj = {
                     "section_path": c.section_path,
                     "start_heading": f"{c.section_id} {c.title}",
                     "content": c.content,
                     "tables": [f"Table {t.id}" for t in (c.tables or [])],
                     "figures": [f"Figure {fg.id}" for fg in (c.figures or [])],
-                    "page_range": [int(x) for x in c.page_range.split(",")],
+                    "page_range": pr_list,
                 }
                 json.dump(obj, f, ensure_ascii=False)
                 f.write("\n")
@@ -328,9 +401,9 @@ class ChunkBuilder:
         return count
 
 
-_cleaner = Cleaner()
+_cleaner: AbstractCleaner = Cleaner()
 _detector = HeadingDetector(_cleaner)
-_builder = ChunkBuilder(_cleaner, _detector)
+_builder: AbstractChunkBuilder = ChunkBuilder(_cleaner, _detector)
 
 
 def norm_caption_line(s: str) -> str:
