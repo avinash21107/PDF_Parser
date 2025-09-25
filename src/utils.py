@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import io
 import re
-from typing import List, Optional, Tuple
+from typing import Generator, List, Optional, Tuple
 
 import pdfplumber
 
@@ -11,7 +12,45 @@ from src.logger import get_logger
 LOG = get_logger(__name__)
 
 
-class PDFUtils:
+class AbstractPDFUtils(ABC):
+    """Abstract contract for PDF utilities."""
+
+    LIGATURES: dict[str, str]
+    TOC_START_PAT: re.Pattern
+    LIST_STOP_PAT: re.Pattern
+    HEADING_RE: re.Pattern
+    DOT_LEADERS_RX: re.Pattern
+
+    @abstractmethod
+    def normalize_text(self, s: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def strip_dot_leaders(self, s: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def autodetect_toc_range(self, pdf_path: str) -> Optional[Tuple[int, int]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def parse_page_range(self, s: str) -> Tuple[int, int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def extract_text_lines(self, pdf_path: str, start: int, end: int) -> List[str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def extract_all_pages(self, pdf_path: str) -> List[Tuple[int, str]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def looks_like_heading(self, num: str, title: str) -> bool:
+        raise NotImplementedError
+
+
+class PDFUtils(AbstractPDFUtils):
     """Encapsulate PDF text normalization, ToC detection, and page extraction utilities."""
 
     LIGATURES = {
@@ -32,14 +71,32 @@ class PDFUtils:
 
     DOT_LEADERS_RX = re.compile(r"\.{3,}")
 
+    NBSP_RX = re.compile(r"[\u00A0\u202F]")
+    DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
+
     def __init__(self) -> None:
-        #
+        # no external state to init currently, kept for future DI/test hooks
         pass
+
+    def __str__(self) -> str:
+        return "PDFUtils()"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PDFUtils):
+            return NotImplemented
+        # equality based on pattern text for deterministic comparison in tests
+        return (
+            self.TOC_START_PAT.pattern == other.TOC_START_PAT.pattern
+            and self.LIST_STOP_PAT.pattern == other.LIST_STOP_PAT.pattern
+        )
 
     def normalize_text(self, s: str) -> str:
         """Replace ligatures and normalize spaces."""
         if not s:
             return ""
+        # normalize NBSP/dash variants early
+        s = self.NBSP_RX.sub(" ", s)
+        s = self.DASH_RX.sub("-", s)
         for k, v in self.LIGATURES.items():
             s = s.replace(k, v)
         s = re.sub(r"[ \t]+", " ", s)
@@ -50,34 +107,44 @@ class PDFUtils:
         return self.DOT_LEADERS_RX.sub(" ", s or "")
 
     def autodetect_toc_range(self, pdf_path: str) -> Optional[Tuple[int, int]]:
-        """Detect start/end pages of the Table of Contents in a PDF."""
+        """Detect start/end pages of the Table of Contents in a PDF.
+
+        Returns 1-based page numbers (start, end) or None if not found.
+        """
+        pdf_path = str(pdf_path)
         LOG.debug("Autodetecting ToC range in %s", pdf_path)
-        with pdfplumber.open(pdf_path) as pdf:
-            n = len(pdf.pages)
-            start = None
-            for i in range(min(n, 30)):
-                txt = pdf.pages[i].extract_text() or ""
-                if self.TOC_START_PAT.search(self.normalize_text(txt)):
-                    start = i + 1  # 1-based page number
-                    LOG.debug("Found ToC start marker on page %d", start)
-                    break
-            if start is None:
-                LOG.debug("No ToC start marker found in first 30 pages")
-                return None
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                n = len(pdf.pages)
+                start: Optional[int] = None
+                # search first N pages for ToC start marker
+                for i in range(min(n, 30)):
+                    txt = pdf.pages[i].extract_text() or ""
+                    if self.TOC_START_PAT.search(self.normalize_text(txt)):
+                        start = i + 1  # 1-based
+                        LOG.debug("Found ToC start marker on page %d", start)
+                        break
+                if start is None:
+                    LOG.debug("No ToC start marker found in first 30 pages")
+                    return None
 
-            end = None
-            for p in range(start + 1, min(start + 12, n) + 1):
-                txt = pdf.pages[p - 1].extract_text() or ""
-                if self.LIST_STOP_PAT.search(self.normalize_text(txt)):
-                    end = p - 1
-                    LOG.debug("Found ToC end marker near page %d -> end=%d", p, end)
-                    break
+                end: Optional[int] = None
+                # search for list stop marker nearby
+                for p in range(start + 1, min(start + 12, n) + 1):
+                    txt = pdf.pages[p - 1].extract_text() or ""
+                    if self.LIST_STOP_PAT.search(self.normalize_text(txt)):
+                        end = p - 1
+                        LOG.debug("Found ToC end marker near page %d -> end=%d", p, end)
+                        break
 
-            if end is None:
-                end = min(start + 7, n)
-                LOG.debug("Defaulting ToC end to %d", end)
+                if end is None:
+                    end = min(start + 7, n)
+                    LOG.debug("Defaulting ToC end to %d", end)
 
-            return start, end
+                return start, end
+        except Exception as exc:
+            LOG.exception("autodetect_toc_range failed for %s: %s", pdf_path, exc)
+            return None
 
     def parse_page_range(self, s: str) -> Tuple[int, int]:
         """Parse a string like '13-18' into a tuple of integers."""
@@ -86,18 +153,37 @@ class PDFUtils:
             raise ValueError("Page range must be like '13-18'")
         return int(m.group(1)), int(m.group(2))
 
+    def _iter_lines_in_pages(
+        self, pdf_path: str, start: int, end: int
+    ) -> Generator[str, None, None]:
+        """Yield text lines from pages start..end (inclusive) as a streaming generator.
+
+        This avoids building large intermediate lists for big PDFs.
+        """
+        pdf_path = str(pdf_path)
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                n = len(pdf.pages)
+                start = max(1, start)
+                end = min(end, n)
+                for pno in range(start, end + 1):
+                    page = pdf.pages[pno - 1]
+                    txt = page.extract_text() or ""
+                    for line in io.StringIO(txt).read().splitlines():
+                        yield line
+        except Exception as exc:
+            LOG.exception(
+                "Error iterating lines for %s pages %d-%d: %s",
+                pdf_path,
+                start,
+                end,
+                exc,
+            )
+
     def extract_text_lines(self, pdf_path: str, start: int, end: int) -> List[str]:
         """Extract text lines from a PDF between start and end pages (inclusive)."""
         LOG.debug("Extracting text lines from %s pages %d-%d", pdf_path, start, end)
-        lines: List[str] = []
-        with pdfplumber.open(pdf_path) as pdf:
-            n = len(pdf.pages)
-            start = max(1, start)
-            end = min(end, n)
-            for pno in range(start, end + 1):
-                page = pdf.pages[pno - 1]
-                txt = page.extract_text() or ""
-                lines.extend(io.StringIO(txt).read().splitlines())
+        lines = list(self._iter_lines_in_pages(pdf_path, start, end))
         LOG.debug("Extracted %d lines from %s", len(lines), pdf_path)
         return lines
 
@@ -105,10 +191,13 @@ class PDFUtils:
         """Extract all pages from a PDF as a list of (page_number, text) tuples."""
         LOG.debug("Extracting all pages from %s", pdf_path)
         pages: List[Tuple[int, str]] = []
-        with pdfplumber.open(pdf_path) as pdf:
-            for i, page in enumerate(pdf.pages, 1):
-                txt = page.extract_text() or ""
-                pages.append((i, txt))
+        try:
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                for i, page in enumerate(pdf.pages, 1):
+                    txt = page.extract_text() or ""
+                    pages.append((i, txt))
+        except Exception as exc:
+            LOG.exception("extract_all_pages failed for %s: %s", pdf_path, exc)
         LOG.debug("Extracted %d pages from %s", len(pages), pdf_path)
         return pages
 
@@ -127,8 +216,7 @@ class PDFUtils:
             return False
         return True
 
-
-_utils = PDFUtils()
+_utils: AbstractPDFUtils = PDFUtils()
 
 
 def normalize_text(s: str) -> str:
@@ -169,3 +257,5 @@ def extract_all_pages(pdf_path: str) -> List[Tuple[int, str]]:
 
 def looks_like_heading(num: str, title: str) -> bool:
     return _utils.looks_like_heading(num, title)
+
+
