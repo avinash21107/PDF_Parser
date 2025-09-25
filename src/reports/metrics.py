@@ -37,7 +37,6 @@ class MetricsCalculator(AbstractMetricsCalculator):
     """
 
     def __init__(self, token_word_ratio: float = 1.3) -> None:
-        # words -> approx tokens conversion uses a configurable ratio (words / ratio)
         self.token_word_ratio = float(token_word_ratio)
 
     def __str__(self) -> str:
@@ -76,7 +75,6 @@ class MetricsCalculator(AbstractMetricsCalculator):
 
     def _count_tables_in_chunk(self, ch: Chunk) -> int:
         """Count tables in a chunk (tables list + figures that are tables)."""
-        # localize attribute access for speed/readability
         tables_attr = getattr(ch, "tables", None) or []
         figs = getattr(ch, "figures", None) or []
         tables_count = len(tables_attr)
@@ -132,8 +130,6 @@ class MetricsCalculator(AbstractMetricsCalculator):
          - sections_without_tables
         """
         LOG.debug("Computing metrics: %d ToC entries, %d chunks", len(toc), len(chunks))
-
-        # compute chapter buckets for toc and chunks
         toc_chapters = sorted(
             {
                 b
@@ -220,4 +216,5 @@ def compute_metrics(toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
 
 def write_metrics(out_path: str, metrics: Dict[str, Any]) -> None:
     return _calculator.write(out_path, metrics)
+
 
