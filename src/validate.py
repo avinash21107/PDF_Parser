@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import List, Optional, Tuple
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from Levenshtein import ratio as lev_ratio
 from rich.console import Console
@@ -48,13 +50,48 @@ def norm_id(s: str) -> str:
     """Normalize various dash/nbsp characters and trim (preserve digits/letters)."""
     if not s:
         return ""
-    # use NBSP/DASH replacement consistent with earlier approach
     s = NBSP_RX.sub("", s)
     s = DASH_RX.sub("-", s)
     return s.strip()
 
 
-class Validator:
+def _iter_jsonl(path: Path) -> Generator[Dict[str, Any], None, None]:
+    """Yield JSON objects from a newline-delimited JSONL file (streaming)."""
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+class AbstractValidator(ABC):
+    """Abstract contract for a validator."""
+
+    @abstractmethod
+    def load_toc(self, path: str) -> List[ToCEntry]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_chunks(self, path: str) -> List[Chunk]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def match_sections(
+        self,
+        toc: List[ToCEntry],
+        chunks: List[Chunk],
+        fuzzy_threshold: float = 0.90,
+        prefer_section_id: bool = True,
+    ) -> Tuple[List[str], List[str], List[str], List[str]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_report(self, out_path: str, report: ValidationReport) -> None:
+        raise NotImplementedError
+
+
+class Validator(AbstractValidator):
     """
     Validator handles loading ToC / chunk records, matching sections, and writing summary reports.
 
@@ -72,21 +109,34 @@ class Validator:
         normalize_fn=normalize_text,
         strip_fn=strip_dot_leaders,
     ) -> None:
-
         self.table_rx = table_rx
         self.figure_rx = figure_rx
         self.footer_brand_rx = footer_brand_rx
         self.footer_page_rx = footer_page_rx
         self.fuzzy_brand_rx = fuzzy_brand_rx
 
-        # normalization helpers (from PDFUtils via src.utils)
+        # normalization helpers (from src.utils)
         self.normalize = normalize_fn
         self.strip_dot_leaders = strip_fn
+
+    def __str__(self) -> str:
+        return "Validator(table_rx=%s, figure_rx=%s)" % (
+            getattr(self.table_rx, "pattern", "<regex>"),
+            getattr(self.figure_rx, "pattern", "<regex>"),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Validator):
+            return NotImplemented
+        return (
+            self.table_rx.pattern == other.table_rx.pattern
+            and self.figure_rx.pattern == other.figure_rx.pattern
+        )
 
     def clean_toc_title(self, title: str) -> str:
         """
         Clean and normalise ToC title strings for comparison and display.
-        Uses injected normalization helpers (default: PDFUtils.normalize_text & strip_dot_leaders).
+        Uses injected normalization helpers (default: normalize_text & strip_dot_leaders).
         """
         if not title:
             return ""
@@ -112,38 +162,36 @@ class Validator:
         return s
 
     def load_toc(self, path: str) -> List[ToCEntry]:
-        """Load ToC entries from JSONL file and normalise titles."""
+        """Load ToC entries from JSONL file and normalise titles (streaming)."""
         vals: List[ToCEntry] = []
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                e = ToCEntry.model_validate_json(line)
-                e.title = self.clean_toc_title(e.title)
-                if not e.title or not re.search(r"[A-Za-z]", e.title):
-                    continue
-                vals.append(e)
+        for obj in _iter_jsonl(Path(path)):
+            e = (
+                ToCEntry.model_validate(obj)
+                if isinstance(obj, dict)
+                else ToCEntry.model_validate_json(json.dumps(obj))
+            )
+            e.title = self.clean_toc_title(e.title)
+            if not e.title or not re.search(r"[A-Za-z]", e.title):
+                continue
+            vals.append(e)
         LOG.info("Loaded %d ToC entries from %s", len(vals), path)
         return vals
 
     def load_chunks(self, path: str) -> List[Chunk]:
-        """Load chunk records from JSONL, coercing older export formats to Chunk model."""
+        """Load chunk records from JSONL, coercing older export formats to Chunk model (streaming)."""
         items: List[Chunk] = []
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                obj = json.loads(line)
-                if (
-                    "title" in obj
-                    and "section_id" in obj
-                    and isinstance(obj.get("page_range"), str)
-                ):
-                    items.append(Chunk.model_validate(obj))
-                else:
-                    items.append(
-                        Chunk.model_validate(self._coerce_export_record_to_chunk(obj))
-                    )
+        for obj in _iter_jsonl(Path(path)):
+            # obj is a dict here
+            if (
+                "title" in obj
+                and "section_id" in obj
+                and isinstance(obj.get("page_range"), str)
+            ):
+                items.append(Chunk.model_validate(obj))
+            else:
+                items.append(
+                    Chunk.model_validate(self._coerce_export_record_to_chunk(obj))
+                )
         LOG.info("Loaded %d chunks from %s", len(items), path)
         return items
 
@@ -200,8 +248,8 @@ class Validator:
         self,
         tid: str,
         ttitle_clean: str,
-        chunk_by_id: dict,
-        chunk_titles: list,
+        chunk_by_id: Dict[str, int],
+        chunk_titles: List[Tuple[int, Chunk, str]],
         used_chunk_idxs: set,
         prefer_section_id: bool,
         fuzzy_threshold: float,
@@ -212,7 +260,8 @@ class Validator:
             if ci not in used_chunk_idxs:
                 return ci
         ttitle_l = ttitle_clean.lower()
-        best_i, best_score = None, 0.0
+        best_i: Optional[int] = None
+        best_score = 0.0
         for i, _, ltitle in chunk_titles:
             if i in used_chunk_idxs:
                 continue
@@ -236,10 +285,10 @@ class Validator:
         Returns:
             missing_labels, extra_labels, out_of_order_labels, matched_labels
         """
-        chunk_by_id = {
+        chunk_by_id: Dict[str, int] = {
             norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id
         }
-        chunk_titles = [
+        chunk_titles: List[Tuple[int, Chunk, str]] = [
             (i, c, self.clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)
         ]
         used_chunk_idxs: set[int] = set()
@@ -318,7 +367,7 @@ class Validator:
         LOG.info("Wrote validation report to %s", out_path)
 
 
-_validator = Validator()
+_validator: AbstractValidator = Validator()
 
 
 def load_toc(path: str) -> List[ToCEntry]:
@@ -329,9 +378,14 @@ def load_chunks(path: str) -> List[Chunk]:
     return _validator.load_chunks(path)
 
 
-def match_sections(toc, chunks, fuzzy_threshold=0.90, prefer_section_id=True):
+def match_sections(
+    toc: List[ToCEntry],
+    chunks: List[Chunk],
+    fuzzy_threshold: float = 0.90,
+    prefer_section_id: bool = True,
+):
     return _validator.match_sections(toc, chunks, fuzzy_threshold, prefer_section_id)
 
 
-def write_report(out_path, report):
+def write_report(out_path: str, report: ValidationReport):
     return _validator.write_report(out_path, report)
