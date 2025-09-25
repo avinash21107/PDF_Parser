@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import json
 import os
 import re
 from statistics import mean
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.logger import get_logger
 from ..models import Chunk, ToCEntry
@@ -15,17 +16,37 @@ _CHAPTER_HEAD_RX = re.compile(r"^\s*(\d+)\b")
 _ANY_INT_TOKEN_RX = re.compile(r"\b(\d{1,3})\b")
 
 
-class MetricsCalculator:
+class AbstractMetricsCalculator(ABC):
+    """Abstract contract for metrics calculators."""
+
+    @abstractmethod
+    def compute(self, toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write(self, out_path: str, metrics: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+
+class MetricsCalculator(AbstractMetricsCalculator):
     """
     Encapsulate metrics computation and IO.
 
-    This class is intentionally lightweight and testable. You can inject alternative
-    regexes or token approximation strategies by subclassing or by overriding methods.
+    The class is lightweight and testable. You can inject alternative regexes or
+    override helper methods by subclassing if needed.
     """
 
     def __init__(self, token_word_ratio: float = 1.3) -> None:
         # words -> approx tokens conversion uses a configurable ratio (words / ratio)
         self.token_word_ratio = float(token_word_ratio)
+
+    def __str__(self) -> str:
+        return f"MetricsCalculator(token_word_ratio={self.token_word_ratio})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MetricsCalculator):
+            return NotImplemented
+        return self.token_word_ratio == other.token_word_ratio
 
     def _avg_words(self, chunks: List[Chunk]) -> float:
         """Average number of words per chunk (ignores blank contents)."""
@@ -40,7 +61,6 @@ class MetricsCalculator:
         """Approximate token count from words using the configured ratio."""
         if not words:
             return 0
-        # compute float division explicitly then round to nearest int
         approx = float(words) / self.token_word_ratio
         return int(round(approx))
 
@@ -56,8 +76,10 @@ class MetricsCalculator:
 
     def _count_tables_in_chunk(self, ch: Chunk) -> int:
         """Count tables in a chunk (tables list + figures that are tables)."""
-        tables_count = len(getattr(ch, "tables", None) or [])
+        # localize attribute access for speed/readability
+        tables_attr = getattr(ch, "tables", None) or []
         figs = getattr(ch, "figures", None) or []
+        tables_count = len(tables_attr)
         tables_count += sum(1 for f in figs if self._figure_is_table(f))
         return tables_count
 
@@ -69,7 +91,7 @@ class MetricsCalculator:
 
     def _chapter_bucket_from_fields(
         self, section_id: str, title: str = "", section_path: str = ""
-    ) -> str | None:
+    ) -> Optional[str]:
         """
         Determine a numeric chapter bucket from fields by:
          1. trying section_id header,
@@ -111,6 +133,7 @@ class MetricsCalculator:
         """
         LOG.debug("Computing metrics: %d ToC entries, %d chunks", len(toc), len(chunks))
 
+        # compute chapter buckets for toc and chunks
         toc_chapters = sorted(
             {
                 b
@@ -151,12 +174,12 @@ class MetricsCalculator:
         avg_tokens_per_section = self._approx_tokens_from_words(avg_words)
 
         sections_without_tables = [
-            f"{ch.section_id} {ch.title}".strip()
+            f"{getattr(ch, 'section_id', '')} {getattr(ch, 'title', '')}".strip()
             for ch in chunks
             if not self._has_any_table(ch)
         ]
         sections_without_diagrams = [
-            f"{ch.section_id} {ch.title}".strip()
+            f"{getattr(ch, 'section_id', '')} {getattr(ch, 'title', '')}".strip()
             for ch in chunks
             if (not self._has_any_figure(ch)) and (not self._has_any_table(ch))
         ]
@@ -188,7 +211,7 @@ class MetricsCalculator:
         LOG.info("Wrote metrics to %s", out_path)
 
 
-_calculator = MetricsCalculator()
+_calculator: AbstractMetricsCalculator = MetricsCalculator()
 
 
 def compute_metrics(toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
@@ -197,3 +220,4 @@ def compute_metrics(toc: List[ToCEntry], chunks: List[Chunk]) -> Dict[str, Any]:
 
 def write_metrics(out_path: str, metrics: Dict[str, Any]) -> None:
     return _calculator.write(out_path, metrics)
+
