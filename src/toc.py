@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from pathlib import Path
 import json
-import os
 import re
 from typing import Iterable, List, Tuple
 
@@ -80,12 +81,32 @@ def _ensure_parent_entries(entries: List[ToCEntry], doc_title: str) -> List[ToCE
     return entries
 
 
-class ToCParser:
+class AbstractToCParser(ABC):
+    """Abstract contract for ToC parsers."""
+
+    @abstractmethod
+    def parse_lines(
+        self,
+        lines: Iterable[str],
+        doc_title: str,
+        min_dots: int = 0,
+        strip_dots: bool = False,
+    ) -> List[ToCEntry]:
+        raise NotImplementedError
+
+
+class ToCParser(AbstractToCParser):
     """Thin parser class for Table-of-Contents lines using PDFUtils for normalization."""
 
     def __init__(self) -> None:
-        # State-free; uses utils for normalization
+        # stateless utility parser
         pass
+
+    def __str__(self) -> str:
+        return "ToCParser()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ToCParser)
 
     def _clean_title(self, raw_title: str) -> str:
         t = strip_dot_leaders(raw_title or "")
@@ -96,6 +117,23 @@ class ToCParser:
         t = MULTI_SPACE_RE.sub(" ", t).strip()
         return t
 
+    def _preprocess_line(self, s: str, strip_dots: bool) -> str:
+        s = normalize_text(s)
+        s = ISOLATED_LETTERS_RUN_RX.sub("", s)
+        s = MULTI_SPACE_RE.sub(" ", s).strip()
+        if strip_dots:
+            s = strip_dot_leaders(s)
+        return s.strip()
+
+    def _is_valid_toc_line(self, s: str) -> bool:
+        s_low = s.lower()
+        return not s_low.startswith(
+            ("table of contents", "list of figures", "list of tables")
+        )
+
+    def _should_include_section(self, section_id: str, min_dots: int) -> bool:
+        return _is_appendix(section_id) or section_id.count(".") >= min_dots
+
     def parse_lines(
         self,
         lines: Iterable[str],
@@ -103,24 +141,6 @@ class ToCParser:
         min_dots: int = 0,
         strip_dots: bool = False,
     ) -> List[ToCEntry]:
-
-        def _preprocess_line(s: str) -> str:
-            s = normalize_text(s)
-            s = ISOLATED_LETTERS_RUN_RX.sub("", s)
-            s = MULTI_SPACE_RE.sub(" ", s).strip()
-            if strip_dots:
-                s = strip_dot_leaders(s)
-            return s.strip()
-
-        def _is_valid_toc_line(s: str) -> bool:
-            s_low = s.lower()
-            return not s_low.startswith(
-                ("table of contents", "list of figures", "list of tables")
-            )
-
-        def _should_include_section(section_id: str) -> bool:
-            return _is_appendix(section_id) or section_id.count(".") >= min_dots
-
         SPECIAL_SECTIONS = {
             "10": ("Power Rules", 995),
         }
@@ -128,8 +148,8 @@ class ToCParser:
         entries: List[ToCEntry] = []
 
         for raw in lines:
-            s = _preprocess_line(raw)
-            if not s or not _is_valid_toc_line(s):
+            s = self._preprocess_line(raw, strip_dots)
+            if not s or not self._is_valid_toc_line(s):
                 continue
 
             m = TOC_LINE_RE.match(s)
@@ -137,8 +157,9 @@ class ToCParser:
                 continue
 
             section_id = m.group("section").strip()
-            if not _should_include_section(section_id):
+            if not self._should_include_section(section_id, min_dots):
                 continue
+
             if section_id in SPECIAL_SECTIONS:
                 raw_title, page = SPECIAL_SECTIONS[section_id]
             else:
@@ -167,12 +188,20 @@ class ToCParser:
         return entries
 
 
+_parser: AbstractToCParser = ToCParser()
+
+
+def set_default_parser(parser: AbstractToCParser) -> None:
+    """Swap the module-level parser (useful for tests)."""
+    global _parser
+    _parser = parser
+
+
 def parse_toc_lines(
     lines: Iterable[str], doc_title: str, min_dots: int = 0, strip_dots: bool = False
 ) -> List[ToCEntry]:
     try:
-        parser = ToCParser()
-        return parser.parse_lines(
+        return _parser.parse_lines(
             lines, doc_title=doc_title, min_dots=min_dots, strip_dots=strip_dots
         )
     except Exception as e:
@@ -183,7 +212,7 @@ def parse_toc_lines(
 
 
 def write_jsonl(entries: List[ToCEntry], out_path: str) -> int:
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with open(out_path, "w", encoding="utf-8") as f:
         for e in entries:
