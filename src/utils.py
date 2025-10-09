@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+"""
+utils.py
+
+PDF utilities for normalization, ToC detection, and page extraction.
+
+Changes in this refactor:
+- Added AbstractPDFUtils (abc.ABC) to show Abstraction.
+- PDFUtils now inherits from AbstractPDFUtils (Inheritance).
+- Internal helpers are prefixed with '_' and many things are encapsulated.
+- __str__ and __eq__ implemented for simple polymorphic behavior.
+- Added a streaming line iterator to avoid building huge lists in memory.
+- Kept all previous procedural wrapper functions for backward compatibility.
+"""
+
 from abc import ABC, abstractmethod
 import io
 import re
 from typing import Generator, List, Optional, Tuple
 
 import pdfplumber
+import fitz
 
 from src.logger import get_logger
 
@@ -75,7 +90,7 @@ class PDFUtils(AbstractPDFUtils):
     DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 
     def __init__(self) -> None:
-        # no external state to init currently, kept for future DI/test hooks
+      
         pass
 
     def __str__(self) -> str:
@@ -84,7 +99,7 @@ class PDFUtils(AbstractPDFUtils):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PDFUtils):
             return NotImplemented
-        # equality based on pattern text for deterministic comparison in tests
+        
         return (
             self.TOC_START_PAT.pattern == other.TOC_START_PAT.pattern
             and self.LIST_STOP_PAT.pattern == other.LIST_STOP_PAT.pattern
@@ -103,7 +118,6 @@ class PDFUtils(AbstractPDFUtils):
         return s.strip()
 
     def strip_dot_leaders(self, s: str) -> str:
-        """Remove ... sequences used as dot leaders in tables of contents."""
         return self.DOT_LEADERS_RX.sub(" ", s or "")
 
     def autodetect_toc_range(self, pdf_path: str) -> Optional[Tuple[int, int]]:
@@ -129,7 +143,7 @@ class PDFUtils(AbstractPDFUtils):
                     return None
 
                 end: Optional[int] = None
-                # search for list stop marker nearby
+                
                 for p in range(start + 1, min(start + 12, n) + 1):
                     txt = pdf.pages[p - 1].extract_text() or ""
                     if self.LIST_STOP_PAT.search(self.normalize_text(txt)):
@@ -189,13 +203,16 @@ class PDFUtils(AbstractPDFUtils):
 
     def extract_all_pages(self, pdf_path: str) -> List[Tuple[int, str]]:
         """Extract all pages from a PDF as a list of (page_number, text) tuples."""
-        LOG.debug("Extracting all pages from %s", pdf_path)
+        LOG.debug("Extracting all pages from %s using PyMuPDF", pdf_path)
         pages: List[Tuple[int, str]] = []
         try:
-            with pdfplumber.open(str(pdf_path)) as pdf:
-                for i, page in enumerate(pdf.pages, 1):
-                    txt = page.extract_text() or ""
-                    pages.append((i, txt))
+            with fitz.open(str(pdf_path)) as doc:
+                for page_no, page in enumerate(doc, start=1):
+                    
+                    blocks = page.get_text("blocks")
+                    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  
+                    text = "\n".join(b[4] for b in blocks if b[4].strip())
+                    pages.append((page_no, text))
         except Exception as exc:
             LOG.exception("extract_all_pages failed for %s: %s", pdf_path, exc)
         LOG.debug("Extracted %d pages from %s", len(pages), pdf_path)
@@ -215,6 +232,8 @@ class PDFUtils(AbstractPDFUtils):
         if re.search(r"\b[01]{4,}\b", t):
             return False
         return True
+
+
 
 _utils: AbstractPDFUtils = PDFUtils()
 
@@ -257,5 +276,4 @@ def extract_all_pages(pdf_path: str) -> List[Tuple[int, str]]:
 
 def looks_like_heading(num: str, title: str) -> bool:
     return _utils.looks_like_heading(num, title)
-
 
