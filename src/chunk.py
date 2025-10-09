@@ -77,7 +77,7 @@ class Cleaner(AbstractCleaner):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Cleaner):
             return NotImplemented
-        return True  
+        return True  # stateless equality; adapt if stateful
 
     def norm_caption_line(self, s: str) -> str:
         s = self.regex.NBSP_FIX.sub(" ", s)
@@ -102,13 +102,19 @@ class Cleaner(AbstractCleaner):
         if not text:
             return ""
 
-        for b in ("", "●", "▪", "", "", "", "•"):
+        for b in ("","", "●", "▪", "", "", "", "•"):
             text = text.replace(b, "- ")
 
         text = re.sub(r"(\S)-\n([a-z])", r"\1\2", text)
         text = re.sub(
             r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)", r"\1 \2", text
         )
+        text = text.replace('\\"', '"')
+        text = text.replace("\\'", "'")
+        text = re.sub(r"(?<!\w)/(?!\w)", "", text)
+
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+        text = re.sub(r'\s*"([^"]+)"\s*', r' "\1" ', text)
 
         cleaned_lines: List[str] = []
         for line in text.splitlines():
@@ -119,9 +125,8 @@ class Cleaner(AbstractCleaner):
             if s:
                 cleaned_lines.append(s)
 
-        text = "\n".join(cleaned_lines)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
+
+        return "\n".join(cleaned_lines).strip()
 
     def clean_heading_title(self, title: str) -> str:
         t = strip_dot_leaders(title).strip()
@@ -439,4 +444,3 @@ def normalize_sentences(text: str) -> str:
 
 def write_jsonl(chunks: List[Chunk], out_path: str) -> int:
     return _builder.write_jsonl(chunks, out_path)
-
