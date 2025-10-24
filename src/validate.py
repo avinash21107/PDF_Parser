@@ -1,62 +1,34 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+import argparse
 import json
+import logging
 import os
 import re
-from abc import ABC, abstractmethod
+import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from Levenshtein import ratio as lev_ratio
-from rich.console import Console
-from rich.table import Table
+import pandas as pd
+from openpyxl.styles import Font
+from PyPDF2 import PdfReader
 
 from src.logger import get_logger
-from src.models import Caption, Chunk, ToCEntry, ValidationReport
-from src.utils import normalize_text, strip_dot_leaders
+from src.models import ValidationReport
+from src.validate import load_chunks, load_toc, match_sections
 
 LOG = get_logger(__name__)
-CONSOLE = Console()
 
-_ID_SEP = r"[.\-\u2010\u2011\u2012\u2013\u2014\u2212]"
-_ID_RX = rf"(?:[A-Z]{{1,3}}{_ID_SEP})?\d+(?:{_ID_SEP}\d+)*(?:[a-z])?"
-TABLE_STR_RX = re.compile(rf"(?i)\btable\s+({_ID_RX})\b")
-FIGURE_STR_RX = re.compile(rf"(?i)\bfigure\s+({_ID_RX})\b")
-
-FOOTER_BRAND_RX = re.compile(
-    r"Universal\s+Serial\s+Bus\s+Power\s+Delivery\s+Specification.*?(Revision|Version).*$",
-    re.IGNORECASE,
-)
-FOOTER_PAGE_RX = re.compile(r"\bPage\s*\d+\b", re.IGNORECASE)
-
-FUZZY_BRAND_RX = re.compile(
-    r"U[\s.\-]*n[\s.\-]*i[\s.\-]*v[\s.\-]*e[\s.\-]*r[\s.\-]*s[\s.\-]*a[\s.\-]*l"
-    r"[\s.\-]+S[\s.\-]*e[\s.\-]*r[\s.\-]*i[\s.\-]*a[\s.\-]*l"
-    r"[\s.\-]+B[\s.\-]*u[\s.\-]*s"
-    r"[\s.\-]+P[\s.\-]*o[\s.\-]*w[\s.\-]*e[\s.\-]*r"
-    r"[\s.\-]+D[\s.\-]*e[\s.\-]*l[\s.\-]*i[\s.\-]*v[\s.\-]*e[\s.\-]*r[\s.\-]*y"
-    r"[\s.\-]+S[\s.\-]*p[\s.\-]*e[\s.\-]*c[\s.\-]*i[\s.\-]*f[\s.\-]*i[\s.\-]*c[\s.\-]*a[\s.\-]*t[\s.\-]*i[\s.\-]*o[\s.\-]*n",
-    re.IGNORECASE,
-)
-
-ISOLATED_LETTERS_RUN_RX = re.compile(r"(?:\b[A-Za-z]\b[.\s]*){6,}")
-DOT_LEADERS_RX = re.compile(r"(?:\s*[.\u00B7•\u2022]\s*){3,}")
-NBSP_RX = re.compile(r"[\u00A0\u202F]")
-DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
-HEADING_NUM_TITLE_RX = re.compile(r"^\s*\d+(?:[.\-]\d+)*\s+(?P<title>.+?)\s*$")
+ID_LIST_RX = r"((?:\d+|[A-Z])(?:\.\d+)*[a-z]?)"
+ID_STRICT_RE = re.compile(r"(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)[a-z]?")
+TABLE_RX = re.compile(r"\bTable\s+\d+(?:\.\d+)?", re.IGNORECASE)
 
 
-def norm_id(s: str) -> str:
-    """Normalize various dash/nbsp characters and trim (preserve digits/letters)."""
-    if not s:
-        return ""
-    s = NBSP_RX.sub("", s)
-    s = DASH_RX.sub("-", s)
-    return s.strip()
-
-
-def _iter_jsonl(path: Path) -> Generator[Dict[str, Any], None, None]:
-    """Yield JSON objects from a newline-delimited JSONL file (streaming)."""
+def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
+    """Yield parsed JSON objects from a JSONL file (memory-friendly stream)."""
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -65,327 +37,465 @@ def _iter_jsonl(path: Path) -> Generator[Dict[str, Any], None, None]:
             yield json.loads(line)
 
 
-class AbstractValidator(ABC):
-    """Abstract contract for a validator."""
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Compatibility helper: read entire JSONL into a list (kept for API compatibility)."""
+    return list(iter_jsonl(path))
+
+
+# ---- Extractor abstractions ----
+class AbstractExtractor(ABC):
+    """Abstract base class for figure/table extractors."""
+
+    def __init__(self, reader_cls=PdfReader) -> None:
+        self.reader_cls = reader_cls
 
     @abstractmethod
-    def load_toc(self, path: str) -> List[ToCEntry]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def load_chunks(self, path: str) -> List[Chunk]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def match_sections(
+    def extract_from_pdf(
         self,
-        toc: List[ToCEntry],
-        chunks: List[Chunk],
-        fuzzy_threshold: float = 0.90,
-        prefer_section_id: bool = True,
-    ) -> Tuple[List[str], List[str], List[str], List[str]]:
+        pdf_path: str | Path,
+        lof_range: Tuple[int, int] = (18, 26),
+        lot_range: Tuple[int, int] = (26, 33),
+    ) -> Tuple[Set[str], Set[str]]:
         raise NotImplementedError
 
     @abstractmethod
-    def write_report(self, out_path: str, report: ValidationReport) -> None:
+    def extract_from_jsonl(self, chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def maxima_total(self, ids: Iterable[str]) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def count_tables_in_chunk(self, rec: Dict[str, Any]) -> int:
         raise NotImplementedError
 
 
-class Validator(AbstractValidator):
-    """
-    Validator handles loading ToC / chunk records, matching sections, and writing summary reports.
+class FigureTableExtractor(AbstractExtractor):
+    """Concrete extractor that finds figure and table IDs in PDFs/JSONL."""
 
-    The class supports dependency injection for regexes and normalization helpers to make
-    unit testing and alternative behaviours easy.
-    """
+    _fig_pattern_template = rf"\bFigure\s+{ID_LIST_RX}\b"
+    _tab_pattern_template = rf"\bTable\s+{ID_LIST_RX}\b"
+
+    def __init__(self, reader_cls=PdfReader) -> None:
+        super().__init__(reader_cls=reader_cls)
+        self.fig_list_re = re.compile(self._fig_pattern_template, re.IGNORECASE)
+        self.tab_list_re = re.compile(self._tab_pattern_template, re.IGNORECASE)
+        self.id_strict_re = ID_STRICT_RE
+        self.table_rx = TABLE_RX
+
+    def __str__(self) -> str:  
+        return f"FigureTableExtractor(reader={getattr(self.reader_cls, '__name__', str(self.reader_cls))})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, FigureTableExtractor):
+            return NotImplemented
+        return self.reader_cls == other.reader_cls
+
+    def _extract_text_range(
+        self, reader: PdfReader, start_idx: int, end_idx_excl: int
+    ) -> str:
+        parts: List[str] = []
+        for i in range(start_idx, min(end_idx_excl, len(reader.pages))):
+            try:
+                parts.append(reader.pages[i].extract_text() or "")
+            except Exception:
+                LOG.exception("Failed to extract text from page %d", i)
+                parts.append("")
+        return "\n".join(parts)
+
+    def extract_from_pdf(
+        self,
+        pdf_path: str | Path,
+        lof_range: Tuple[int, int] = (18, 26),
+        lot_range: Tuple[int, int] = (26, 33),
+    ) -> Tuple[Set[str], Set[str]]:
+        reader = self.reader_cls(str(pdf_path))
+        lof_text = self._extract_text_range(reader, *lof_range)
+        lot_text = self._extract_text_range(reader, *lot_range)
+        figs = {m.group(1) for m in self.fig_list_re.finditer(lof_text)}
+        tabs = {m.group(1) for m in self.tab_list_re.finditer(lot_text)}
+        LOG.debug("extract_from_pdf: figs=%d tabs=%d", len(figs), len(tabs))
+        return figs, tabs
+
+    def extract_from_jsonl(self, chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
+        """Stream chunks JSONL and extract strict figure/table IDs."""
+        figs: Set[str] = set()
+        tabs: Set[str] = set()
+        for rec in iter_jsonl(Path(chunks_path)):
+            for s in rec.get("figures", []) or []:
+                m = self.id_strict_re.search(str(s))
+                if m:
+                    figs.add(m.group(0))
+            for s in rec.get("tables", []) or []:
+                m = self.id_strict_re.search(str(s))
+                if m:
+                    tabs.add(m.group(0))
+        LOG.debug("extract_from_jsonl: figs=%d tabs=%d", len(figs), len(tabs))
+        return figs, tabs
+
+    def maxima_total(self, ids: Iterable[str]) -> int:
+        mx: Dict[str, int] = defaultdict(int)
+        for s in ids:
+            head = s.split(".", 1)[0]
+            tail = re.match(r"(\d+)", s.split(".")[-1])
+            if tail:
+                mx[head] = max(mx[head], int(tail.group(1)))
+        total = sum(mx.values())
+        LOG.debug("maxima_total: total=%d based_on=%d_ids", total, len(list(ids)))
+        return total
+
+    def count_tables_in_chunk(self, rec: Dict[str, Any]) -> int:
+        if isinstance(rec.get("tables"), list):
+            return len(rec["tables"])
+        if isinstance(rec.get("tables_count"), int):
+            return rec["tables_count"]
+        txt = rec.get("content") or rec.get("text") or ""
+        return len(self.table_rx.findall(str(txt)))
+
+
+# ---- top-level convenience wrappers (kept for compatibility) ----
+def _extract_text_range(reader: PdfReader, start_idx: int, end_idx_excl: int) -> str:
+    return FigureTableExtractor()._extract_text_range(reader, start_idx, end_idx_excl)
+
+
+def _maxima_total(ids: Iterable[str]) -> int:
+    return FigureTableExtractor().maxima_total(ids)
+
+
+def figure_table_metrics_from_pdf(
+    pdf_path: str | Path,
+    lof_range: Tuple[int, int] = (18, 26),
+    lot_range: Tuple[int, int] = (26, 33),
+) -> Tuple[Set[str], Set[str]]:
+    extractor = FigureTableExtractor()
+    return extractor.extract_from_pdf(pdf_path, lof_range=lof_range, lot_range=lot_range)
+
+
+def figure_table_ids_from_jsonl(chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
+    extractor = FigureTableExtractor()
+    return extractor.extract_from_jsonl(chunks_path)
+
+
+def count_tables_in_chunk(rec: Dict[str, Any]) -> int:
+    return FigureTableExtractor().count_tables_in_chunk(rec)
+
+
+def title_looks_like_table(t: Optional[str]) -> bool:
+    return bool(re.match(r"^\s*Table\s+\d+", (t or ""), flags=re.IGNORECASE))
+
+class AbstractWriter(ABC):
+    """Abstract base class for writers (e.g. ExcelWriter)."""
+
+    @abstractmethod
+    def write(self, target: str | Path, sheets: Dict[str, pd.DataFrame]) -> None:
+        raise NotImplementedError
+
+
+class ExcelWriter(AbstractWriter):
+    """Concrete Excel writer implementing AbstractWriter."""
+
+    def __init__(self, max_width: int = 60) -> None:
+        self.max_width = max_width
+        self.header_font = Font(bold=True)
+
+    def __str__(self) -> str:
+        return f"ExcelWriter(max_width={self.max_width})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ExcelWriter):
+            return NotImplemented
+        return self.max_width == other.max_width
+
+    def _autofit(self, ws: Any) -> None:
+        for cell in ws[1]:
+            cell.font = self.header_font
+
+        for col in ws.columns:
+            values = [str(c.value) if c.value is not None else "" for c in col]
+            width = min(max((len(v) for v in values), default=0) + 2, self.max_width)
+            ws.column_dimensions[col[0].column_letter].width = width
+
+    def write(self, target: str | Path, sheets: Dict[str, pd.DataFrame]) -> None:
+        target_path = Path(target)
+        if target_path.exists():
+            try:
+                target_path.unlink()
+            except PermissionError:
+                LOG.debug(
+                    "Permission to remove existing file %s denied; will try writing anyway",
+                    target_path,
+                )
+        with pd.ExcelWriter(target_path, engine="openpyxl") as writer:
+            for name, df in sheets.items():
+                df.to_excel(writer, sheet_name=name, index=False)
+            wb = writer.book
+            for name in sheets.keys():
+                self._autofit(wb[name])
+
+
+
+class Orchestrator:
+    """Orchestrates ToC extraction, chunking, validation and Excel reporting."""
 
     def __init__(
         self,
-        table_rx: re.Pattern = TABLE_STR_RX,
-        figure_rx: re.Pattern = FIGURE_STR_RX,
-        footer_brand_rx: re.Pattern = FOOTER_BRAND_RX,
-        footer_page_rx: re.Pattern = FOOTER_PAGE_RX,
-        fuzzy_brand_rx: re.Pattern = FUZZY_BRAND_RX,
-        normalize_fn=normalize_text,
-        strip_fn=strip_dot_leaders,
+        cmd_toc_fn: Optional[Callable[..., None]] = None,
+        cmd_chunk_fn: Optional[Callable[..., None]] = None,
+        load_toc_fn: Callable[[str], list] = load_toc,
+        load_chunks_fn: Callable[[str], list] = load_chunks,
+        match_sections_fn: Callable[..., tuple] = match_sections,
+        validation_report_class: Any = ValidationReport,
+        figure_table_extractor: Optional[AbstractExtractor] = None,
+        excel_writer: Optional[AbstractWriter] = None,
     ) -> None:
-        self.table_rx = table_rx
-        self.figure_rx = figure_rx
-        self.footer_brand_rx = footer_brand_rx
-        self.footer_page_rx = footer_page_rx
-        self.fuzzy_brand_rx = fuzzy_brand_rx
+       
+        self.cmd_toc_fn = cmd_toc_fn
+        self.cmd_chunk_fn = cmd_chunk_fn
+        self.load_toc_fn = load_toc_fn
+        self.load_chunks_fn = load_chunks_fn
+        self.match_sections_fn = match_sections_fn
+        self.validationreport = validation_report_class
 
-        # normalization helpers (from src.utils)
-        self.normalize = normalize_fn
-        self.strip_dot_leaders = strip_fn
+        self.figure_table_extractor: AbstractExtractor = (
+            figure_table_extractor or FigureTableExtractor()
+        )
+        self.excel_writer: AbstractWriter = excel_writer or ExcelWriter()
+
+        if self.cmd_toc_fn is None or self.cmd_chunk_fn is None:
+            try:
+                from src.run import cmd_toc, cmd_chunk  
+            except Exception:
+                LOG.debug("Could not import cmd_toc/cmd_chunk from src.run during Orchestrator init.")
+            else:
+                if self.cmd_toc_fn is None:
+                    self.cmd_toc_fn = cmd_toc  
+                if self.cmd_chunk_fn is None:
+                    self.cmd_chunk_fn = cmd_chunk  
+        if any(
+            fn is None
+            for fn in (
+                self.cmd_toc_fn,
+                self.cmd_chunk_fn,
+                load_toc_fn,
+                load_chunks_fn,
+                match_sections_fn,
+                validation_report_class,
+            )
+        ):
+            LOG.warning(
+                "One or more runtime dependencies were not found; tests should inject mocks."
+            )
 
     def __str__(self) -> str:
-        return "Validator(table_rx=%s, figure_rx=%s)" % (
-            getattr(self.table_rx, "pattern", "<regex>"),
-            getattr(self.figure_rx, "pattern", "<regex>"),
-        )
+        return f"Orchestrator(extractor={self.figure_table_extractor}, writer={self.excel_writer})"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Validator):
+        if not isinstance(other, Orchestrator):
             return NotImplemented
         return (
-            self.table_rx.pattern == other.table_rx.pattern
-            and self.figure_rx.pattern == other.figure_rx.pattern
+            self.figure_table_extractor == other.figure_table_extractor
+            and self.excel_writer == other.excel_writer
         )
 
-    def clean_toc_title(self, title: str) -> str:
-        """
-        Clean and normalise ToC title strings for comparison and display.
-        Uses injected normalization helpers (default: normalize_text & strip_dot_leaders).
-        """
-        if not title:
-            return ""
+    def _ensure_cmds_bound(self) -> None:
+        """Ensure cmd_toc_fn and cmd_chunk_fn are bound (try lazy import as last resort)."""
+        if self.cmd_toc_fn is not None and self.cmd_chunk_fn is not None:
+            return
+        try:
+            from src.run import cmd_toc, cmd_chunk 
+        except Exception:
+            LOG.debug("Lazy import of cmd_toc/cmd_chunk from src.run failed during execution.")
+        else:
+            if self.cmd_toc_fn is None:
+                self.cmd_toc_fn = cmd_toc 
+            if self.cmd_chunk_fn is None:
+                self.cmd_chunk_fn = cmd_chunk  
 
-        s = self.normalize(title)
-        s = self.footer_brand_rx.sub("", s)
-        s = self.footer_page_rx.sub("", s)
-        s = self.fuzzy_brand_rx.sub("", s)
-        s = self.strip_dot_leaders(s)
-        s = ISOLATED_LETTERS_RUN_RX.sub("", s)
-        m = HEADING_NUM_TITLE_RX.match(s)
-        if m:
-            s = m.group("title")
+    def run_toc(
+        self, pdf: str, toc_pages: Optional[str], doc_title: str, out_path: str
+    ) -> None:
+        ns = SimpleNamespace(
+            pdf=pdf,
+            toc_pages=toc_pages,
+            doc_title=doc_title,
+            out=out_path,
+            min_dots=0,
+            strip_dot_leaders=True,
+        )
+        LOG.info("Running ToC extraction -> %s", out_path)
 
-        s = re.sub(r"[,;]\s*(?:\d[\s.\-]*){2,}$", "", s)
+        self._ensure_cmds_bound()
 
-        s = re.sub(r"\s{2,}", " ", s).strip()
-        norm = re.sub(r"[\s.\-]+", "", s).lower()
-        if "universalserialbuspowerdeliveryspecification" in norm:
-            parts = s.split()
-            s = " ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
-
-        return s
-
-    def load_toc(self, path: str) -> List[ToCEntry]:
-        """Load ToC entries from JSONL file and normalise titles (streaming)."""
-        vals: List[ToCEntry] = []
-        for obj in _iter_jsonl(Path(path)):
-            e = (
-                ToCEntry.model_validate(obj)
-                if isinstance(obj, dict)
-                else ToCEntry.model_validate_json(json.dumps(obj))
+        if self.cmd_toc_fn is None:
+            LOG.error("cmd_toc_fn is not available when attempting run_toc")
+            raise RuntimeError(
+                "cmd_toc function not available; provide it during Orchestrator construction or ensure src.run exposes cmd_toc"
             )
-            e.title = self.clean_toc_title(e.title)
-            if not e.title or not re.search(r"[A-Za-z]", e.title):
-                continue
-            vals.append(e)
-        LOG.info("Loaded %d ToC entries from %s", len(vals), path)
-        return vals
+        self.cmd_toc_fn(ns)
 
-    def load_chunks(self, path: str) -> List[Chunk]:
-        """Load chunk records from JSONL, coercing older export formats to Chunk model (streaming)."""
-        items: List[Chunk] = []
-        for obj in _iter_jsonl(Path(path)):
-            # obj is a dict here
-            if (
-                "title" in obj
-                and "section_id" in obj
-                and isinstance(obj.get("page_range"), str)
-            ):
-                items.append(Chunk.model_validate(obj))
-            else:
-                items.append(
-                    Chunk.model_validate(self._coerce_export_record_to_chunk(obj))
-                )
-        LOG.info("Loaded %d chunks from %s", len(items), path)
-        return items
+    def run_chunk(self, pdf: str, toc_path: str, out_path: str) -> None:
+        ns = SimpleNamespace(pdf=pdf, toc=toc_path, out=out_path)
+        LOG.info("Running chunk extraction -> %s", out_path)
 
-    def _extract_chunk_info(self, obj: dict) -> tuple[str, str, str, str, str]:
-        section_path = obj.get("section_path") or obj.get("start_heading") or ""
-        if " " in section_path:
-            section_id, title = section_path.split(" ", 1)
-        else:
-            section_id = obj.get("section_id") or ""
-            title = obj.get("title") or section_path
-        content = obj.get("content", "")
-        pr = obj.get("page_range", "")
-        if isinstance(pr, list) and len(pr) == 2:
-            page_range = f"{int(pr[0])},{int(pr[1])}"
-        elif isinstance(pr, str):
-            page_range = pr
-        else:
-            page_range = ""
-        return section_path, section_id, title, page_range, content
+    
+        self._ensure_cmds_bound()
 
-    def _coerce_export_record_to_chunk(self, obj: dict) -> Chunk:
-        """
-        Convert legacy export records into the Chunk model. Preserves behaviour of previous function.
-        """
-        section_path, section_id, title, page_range, content = self._extract_chunk_info(
-            obj
-        )
+        if self.cmd_chunk_fn is None:
+            LOG.error("cmd_chunk_fn is not available when attempting run_chunk")
+            raise RuntimeError(
+                "cmd_chunk function not available; provide it during Orchestrator construction or ensure src.run exposes cmd_chunk"
+            )
+        self.cmd_chunk_fn(ns)
 
-        def _to_captions(items, rx):
-            caps: list[Caption] = []
-            for it in items or []:
-                if isinstance(it, dict) and "id" in it:
-                    caps.append(Caption(id=str(it["id"])))
-                elif isinstance(it, str):
-                    m = rx.search(it)
-                    if m:
-                        caps.append(Caption(id=m.group(1)))
-            return caps
-
-        tables = _to_captions(obj.get("tables"), self.table_rx)
-        figures = _to_captions(obj.get("figures"), self.figure_rx)
-
-        return Chunk(
-            section_path=section_path or f"{section_id} {title}".strip(),
-            section_id=section_id,
-            title=title,
-            page_range=page_range,
-            content=content,
-            tables=tables,
-            figures=figures,
-        )
-
-    def _find_matching_chunk(
+    def _build_report_dataframes(
         self,
-        tid: str,
-        ttitle_clean: str,
-        chunk_by_id: Dict[str, int],
-        chunk_titles: List[Tuple[int, Chunk, str]],
-        used_chunk_idxs: set,
-        prefer_section_id: bool,
-        fuzzy_threshold: float,
-    ) -> Optional[int]:
-        """Find the best matching chunk index for a ToC entry id/title."""
-        if prefer_section_id and tid in chunk_by_id:
-            ci = chunk_by_id[tid]
-            if ci not in used_chunk_idxs:
-                return ci
-        ttitle_l = ttitle_clean.lower()
-        best_i: Optional[int] = None
-        best_score = 0.0
-        for i, _, ltitle in chunk_titles:
-            if i in used_chunk_idxs:
-                continue
-            score = lev_ratio(ttitle_l, ltitle)
-            if score > best_score:
-                best_i, best_score = i, score
-        if best_i is not None and best_score >= fuzzy_threshold:
-            return best_i
-        return None
+        report: ValidationReport,
+        figs_toc: Set[str],
+        tabs_toc: Set[str],
+        figs_chunks: Set[str],
+        tabs_chunks: Set[str],
+    ) -> Dict[str, pd.DataFrame]:
+        """Return a dict of sheet_name -> DataFrame for the validation Excel."""
+        fig_matched = len(figs_toc & figs_chunks)
+        tab_matched = len(tabs_toc & tabs_chunks)
+        fig_missing = sorted(figs_toc - figs_chunks)
+        tab_missing = sorted(tabs_toc - tabs_chunks)
+        fig_extra = sorted(figs_chunks - figs_toc)
+        tab_extra = sorted(tabs_chunks - tabs_toc)
 
-    def match_sections(
-        self,
-        toc: List[ToCEntry],
-        chunks: List[Chunk],
-        fuzzy_threshold: float = 0.90,
-        prefer_section_id: bool = True,
-    ) -> Tuple[List[str], List[str], List[str], List[str]]:
-        """
-        Match ToC entries to parsed chunks.
+        figs_range_total = self.figure_table_extractor.maxima_total(figs_toc)
+        tabs_range_total = self.figure_table_extractor.maxima_total(tabs_toc)
 
-        Returns:
-            missing_labels, extra_labels, out_of_order_labels, matched_labels
-        """
-        chunk_by_id: Dict[str, int] = {
-            norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id
+        overview_rows = [
+            ("Total sections (ToC)", report.toc_section_count),
+            ("Total sections (ToC_Specs)", report.parsed_section_count),
+            ("Matched sections", len(report.matched_sections)),
+            ("Missing sections", len(report.missing_sections)),
+            ("Extra sections", len(report.extra_sections)),
+            ("Out-of-order sections", len(report.out_of_order_sections)),
+            ("ToC figures (unique IDs)", len(figs_toc)),
+            ("ToC tables (unique IDs)", len(tabs_toc)),
+            ("ToC figures (range total)", figs_range_total),
+            ("ToC tables (range total)", tabs_range_total),
+            ("Matched figure IDs", fig_matched),
+            ("Matched table IDs", tab_matched),
+            ("Missing figure IDs in ToC_Specs", len(fig_missing)),
+            ("Missing table IDs in ToC_Specs", len(tab_missing)),
+        ]
+        overview_df = pd.DataFrame(overview_rows, columns=["Metric", "Value"])
+
+        sheets = {
+            "Overview": overview_df,
+            "MissingSections": pd.DataFrame({"section": report.missing_sections}),
+            "ExtraSections": pd.DataFrame({"section": report.extra_sections}),
+            "OutOfOrder": pd.DataFrame({"section": report.out_of_order_sections}),
+            "MatchedSections": pd.DataFrame({"section": report.matched_sections}),
+            "MissingFigureIDs": pd.DataFrame({"figure_id_missing": fig_missing}),
+            "MissingTableIDs": pd.DataFrame({"table_id_missing": tab_missing}),
+            "ExtraFigureIDs": pd.DataFrame({"figure_id_extra": fig_extra}),
+            "ExtraTableIDs": pd.DataFrame({"table_id_extra": tab_extra}),
         }
-        chunk_titles: List[Tuple[int, Chunk, str]] = [
-            (i, c, self.clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)
-        ]
-        used_chunk_idxs: set[int] = set()
-        matched_labels: list[str] = []
-        matched_idx: list[Optional[int]] = []
-        missing_labels: list[str] = []
+        return sheets
 
-        for t in toc:
-            tid = norm_id(t.section_id)
-            ttitle_clean = self.clean_toc_title(t.title)
-            chunk_i = self._find_matching_chunk(
-                tid,
-                ttitle_clean,
-                chunk_by_id,
-                chunk_titles,
-                used_chunk_idxs,
-                prefer_section_id,
-                fuzzy_threshold,
-            )
-            if chunk_i is not None:
-                used_chunk_idxs.add(chunk_i)
-                matched_labels.append(f"{t.section_id} {ttitle_clean}")
-                matched_idx.append(chunk_i)
-            else:
-                missing_labels.append(f"{t.section_id} {ttitle_clean}")
-                matched_idx.append(None)
+    def _safe_write_excel(self, xls_path: str, sheets: Dict[str, pd.DataFrame]) -> None:
+        """Attempt to write Excel file and fall back to timestamped alternate on PermissionError."""
+        target_path = Path(xls_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._write_excel_with_autofit(xls_path, sheets)
+            LOG.info("Wrote validation Excel -> %s", xls_path)
+        except PermissionError:
+            alt = target_path.parent / f"ValidationReport_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            LOG.warning("Could not write %s (maybe file open). Writing to %s", xls_path, alt)
+            self._write_excel_with_autofit(str(alt), sheets)
+            LOG.info("Wrote validation Excel -> %s", alt)
 
-        extra_labels = [
-            f"{c.section_id} {self.clean_toc_title(c.title)}"
-            for i, c in enumerate(chunks)
-            if i not in used_chunk_idxs
-        ]
+    def write_validation_xls_from_validate(
+        self, toc_path: str, chunks_path: str, xls_path: str, pdf_path: str
+    ) -> None:
+        """Load ToC & chunks, validate, extract figure/table IDs and write Excel report."""
+        LOG.info("Loading ToC from %s", toc_path)
+        toc = self.load_toc_fn(toc_path)
+        LOG.info("Loading chunks from %s", chunks_path)
+        chunks = self.load_chunks_fn(chunks_path)
 
-        out_of_order_labels: list[str] = []
-        last_idx = -1
-        for lbl, ci in zip(matched_labels, matched_idx):
-            if ci is not None:
-                if ci < last_idx:
-                    out_of_order_labels.append(lbl)
-                else:
-                    last_idx = ci
-
-        LOG.info(
-            "Matching results: %d missing, %d extra, %d out-of-order, %d matched",
-            len(missing_labels),
-            len(extra_labels),
-            len(out_of_order_labels),
-            len(matched_labels),
+        missing, extra, out_of_order, matched = self.match_sections_fn(
+            toc, chunks, fuzzy_threshold=0.90, prefer_section_id=True
         )
-        return missing_labels, extra_labels, out_of_order_labels, matched_labels
 
-    def write_report(self, out_path: str, report: ValidationReport) -> None:
-        """Write the validation report to JSON and print a summary table to console."""
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        data = report.model_dump()
-        toc_cnt = data.get("toc_section_count", 0)
-        parsed_cnt = data.get("parsed_section_count", 0)
-        matched = data.get("matched_sections", [])
-        missing = data.get("missing_sections", [])
-        extra = data.get("extra_sections", [])
-        out_of_order = data.get("out_of_order_sections", [])
+        report = self.validationreport(
+            toc_section_count=len(toc),
+            parsed_section_count=len(chunks),
+            missing_sections=missing,
+            extra_sections=extra,
+            out_of_order_sections=out_of_order,
+            matched_sections=matched,
+        )
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        figs_toc, tabs_toc = self.figure_table_extractor.extract_from_pdf(pdf_path)
+        figs_chunks, tabs_chunks = self.figure_table_extractor.extract_from_jsonl(chunks_path)
 
-        table = Table(title="Validation Summary")
-        table.add_column("Metric")
-        table.add_column("Value")
-        table.add_row("Total sections (ToC)", str(toc_cnt))
-        table.add_row("Total sections (Chunks)", str(parsed_cnt))
-        table.add_row("Matched sections", str(len(matched)))
-        table.add_row("Missing sections", str(len(missing)))
-        table.add_row("Extra sections", str(len(extra)))
-        table.add_row("Out-of-order sections", str(len(out_of_order)))
-        CONSOLE.print(table)
-        LOG.info("Wrote validation report to %s", out_path)
+        sheets = self._build_report_dataframes(report, figs_toc, tabs_toc, figs_chunks, tabs_chunks)
+
+    
+        self._safe_write_excel(xls_path, sheets)
+
+    def _write_excel_with_autofit(
+        self, target: str | Path, sheets: Dict[str, pd.DataFrame]
+    ) -> None:
+        self.excel_writer.write(target, sheets)
+
+    def run_all(
+        self, pdf: str, doc_title: str, outdir: str, toc_pages: Optional[str] = None
+    ) -> Tuple[str, str, str]:
+        outdir_path = Path(outdir)
+        outdir_path.mkdir(parents=True, exist_ok=True)
+        toc_path = outdir_path / "usb_pd_toc.jsonl"
+        self.run_toc(
+            pdf=pdf, toc_pages=toc_pages, doc_title=doc_title, out_path=str(toc_path)
+        )
+        LOG.info("[1/3] ToC -> %s", toc_path)
+
+        chunks_path = outdir_path / "usb_pd_spec.jsonl"
+        self.run_chunk(pdf=pdf, toc_path=str(toc_path), out_path=str(chunks_path))
+        LOG.info("[2/3] Chunks -> %s", chunks_path)
+
+        xls_path = outdir_path / "ValidationReport.xlsx"
+        self.write_validation_xls_from_validate(
+            str(toc_path), str(chunks_path), str(xls_path), pdf
+        )
+        LOG.info("[3/3] Validation Excel -> %s", xls_path)
+        return str(toc_path), str(chunks_path), str(xls_path)
+
+def main(argv: Optional[List[str]] = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    ap = argparse.ArgumentParser(
+        description="USB-PD parser orchestrator (ToC + Chunks + XLS validation)"
+    )
+    ap.add_argument("--pdf", required=True, help="Path to the USB-PD PDF")
+    ap.add_argument(
+        "--doc-title", default="Universal Serial Bus Power Delivery Specification"
+    )
+    ap.add_argument("--outdir", default=os.path.join("data", "output"))
+    ap.add_argument(
+        "--toc-pages", default=None, help="Optional ToC page range like '13-18'"
+    )
+    args = ap.parse_args(argv)
+
+    orchestrator = Orchestrator()
+    try:
+        orchestrator.run_all(
+            pdf=args.pdf, doc_title=args.doc_title, outdir=args.outdir, toc_pages=args.toc_pages
+        )
+        return 0
+    except Exception:
+        LOG.exception("Orchestration failed")
+        return 2
 
 
-_validator: AbstractValidator = Validator()
-
-
-def load_toc(path: str) -> List[ToCEntry]:
-    return _validator.load_toc(path)
-
-
-def load_chunks(path: str) -> List[Chunk]:
-    return _validator.load_chunks(path)
-
-
-def match_sections(
-    toc: List[ToCEntry],
-    chunks: List[Chunk],
-    fuzzy_threshold: float = 0.90,
-    prefer_section_id: bool = True,
-):
-    return _validator.match_sections(toc, chunks, fuzzy_threshold, prefer_section_id)
-
-
-def write_report(out_path: str, report: ValidationReport):
-    return _validator.write_report(out_path, report)
+if __name__ == "__main__":
+    raise SystemExit(main())
