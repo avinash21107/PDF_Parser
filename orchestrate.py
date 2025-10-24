@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 import argparse
 import json
 import logging
@@ -18,7 +18,6 @@ from PyPDF2 import PdfReader
 
 from src.logger import get_logger
 from src.models import ValidationReport
-from src.run import cmd_chunk, cmd_toc
 from src.validate import load_chunks, load_toc, match_sections
 
 LOG = get_logger(__name__)
@@ -28,23 +27,23 @@ ID_STRICT_RE = re.compile(r"(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)[a-z]?")
 TABLE_RX = re.compile(r"\bTable\s+\d+(?:\.\d+)?", re.IGNORECASE)
 
 
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+# ---- helpers for JSONL streaming ----
+def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
+    """Yield parsed JSON objects from a JSONL file (memory-friendly stream)."""
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
-            rows.append(json.loads(line))
-    return rows
+            yield json.loads(line)
 
+
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Compatibility helper: read entire JSONL into a list (kept for API compatibility)."""
+    return list(iter_jsonl(path))
 
 class AbstractExtractor(ABC):
-    """Abstract base class for figure/table extractors.
-
-    Subclasses must implement methods to extract IDs from PDFs and JSONL
-    chunks, and provide helper behaviours used by the rest of the system.
-    """
+    """Abstract base class for figure/table extractors."""
 
     def __init__(self, reader_cls=PdfReader) -> None:
         self.reader_cls = reader_cls
@@ -72,10 +71,7 @@ class AbstractExtractor(ABC):
 
 
 class FigureTableExtractor(AbstractExtractor):
-    """Concrete extractor that finds figure and table IDs in PDFs/JSONL.
-
-    Inherits from AbstractExtractor to demonstrate Abstraction and Inheritance.
-    """
+    """Concrete extractor that finds figure and table IDs in PDFs/JSONL."""
 
     _fig_pattern_template = rf"\bFigure\s+{ID_LIST_RX}\b"
     _tab_pattern_template = rf"\bTable\s+{ID_LIST_RX}\b"
@@ -87,7 +83,7 @@ class FigureTableExtractor(AbstractExtractor):
         self.id_strict_re = ID_STRICT_RE
         self.table_rx = TABLE_RX
 
-    def __str__(self) -> str:  # polymorphic representation
+    def __str__(self) -> str: 
         return f"FigureTableExtractor(reader={getattr(self.reader_cls, '__name__', str(self.reader_cls))})"
 
     def __eq__(self, other: object) -> bool:
@@ -118,20 +114,23 @@ class FigureTableExtractor(AbstractExtractor):
         lot_text = self._extract_text_range(reader, *lot_range)
         figs = {m.group(1) for m in self.fig_list_re.finditer(lof_text)}
         tabs = {m.group(1) for m in self.tab_list_re.finditer(lot_text)}
+        LOG.debug("extract_from_pdf: figs=%d tabs=%d", len(figs), len(tabs))
         return figs, tabs
 
     def extract_from_jsonl(self, chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
+        """Stream chunks JSONL and extract strict figure/table IDs."""
         figs: Set[str] = set()
         tabs: Set[str] = set()
-        for rec in read_jsonl(Path(chunks_path)):
+        for rec in iter_jsonl(Path(chunks_path)):
             for s in rec.get("figures", []) or []:
-                m = self.id_strict_re.search(s)
+                m = self.id_strict_re.search(str(s))
                 if m:
                     figs.add(m.group(0))
             for s in rec.get("tables", []) or []:
-                m = self.id_strict_re.search(s)
+                m = self.id_strict_re.search(str(s))
                 if m:
                     tabs.add(m.group(0))
+        LOG.debug("extract_from_jsonl: figs=%d tabs=%d", len(figs), len(tabs))
         return figs, tabs
 
     def maxima_total(self, ids: Iterable[str]) -> int:
@@ -141,7 +140,9 @@ class FigureTableExtractor(AbstractExtractor):
             tail = re.match(r"(\d+)", s.split(".")[-1])
             if tail:
                 mx[head] = max(mx[head], int(tail.group(1)))
-        return sum(mx.values())
+        total = sum(mx.values())
+        LOG.debug("maxima_total: total=%d based_on=%d_ids", total, len(list(ids)))
+        return total
 
     def count_tables_in_chunk(self, rec: Dict[str, Any]) -> int:
         if isinstance(rec.get("tables"), list):
@@ -149,8 +150,36 @@ class FigureTableExtractor(AbstractExtractor):
         if isinstance(rec.get("tables_count"), int):
             return rec["tables_count"]
         txt = rec.get("content") or rec.get("text") or ""
-        return len(self.table_rx.findall(txt))
+        return len(self.table_rx.findall(str(txt)))
 
+def _extract_text_range(reader: PdfReader, start_idx: int, end_idx_excl: int) -> str:
+    return FigureTableExtractor()._extract_text_range(reader, start_idx, end_idx_excl)
+
+
+def _maxima_total(ids: Iterable[str]) -> int:
+    return FigureTableExtractor().maxima_total(ids)
+
+
+def figure_table_metrics_from_pdf(
+    pdf_path: str | Path,
+    lof_range: Tuple[int, int] = (18, 26),
+    lot_range: Tuple[int, int] = (26, 33),
+) -> Tuple[Set[str], Set[str]]:
+    extractor = FigureTableExtractor()
+    return extractor.extract_from_pdf(pdf_path, lof_range=lof_range, lot_range=lot_range)
+
+
+def figure_table_ids_from_jsonl(chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
+    extractor = FigureTableExtractor()
+    return extractor.extract_from_jsonl(chunks_path)
+
+
+def count_tables_in_chunk(rec: Dict[str, Any]) -> int:
+    return FigureTableExtractor().count_tables_in_chunk(rec)
+
+
+def title_looks_like_table(t: Optional[str]) -> bool:
+    return bool(re.match(r"^\s*Table\s+\d+", (t or ""), flags=re.IGNORECASE))
 
 class AbstractWriter(ABC):
     """Abstract base class for writers (e.g. ExcelWriter)."""
@@ -202,51 +231,14 @@ class ExcelWriter(AbstractWriter):
                 self._autofit(wb[name])
 
 
-def _extract_text_range(reader: PdfReader, start_idx: int, end_idx_excl: int) -> str:
-    return FigureTableExtractor()._extract_text_range(reader, start_idx, end_idx_excl)
-
-
-def _maxima_total(ids: Iterable[str]) -> int:
-    return FigureTableExtractor().maxima_total(ids)
-
-
-def figure_table_metrics_from_pdf(
-    pdf_path: str | Path,
-    lof_range: Tuple[int, int] = (18, 26),
-    lot_range: Tuple[int, int] = (26, 33),
-) -> Tuple[Set[str], Set[str]]:
-    extractor = FigureTableExtractor()
-    return extractor.extract_from_pdf(
-        pdf_path, lof_range=lof_range, lot_range=lot_range
-    )
-
-
-def figure_table_ids_from_jsonl(chunks_path: str | Path) -> Tuple[Set[str], Set[str]]:
-    extractor = FigureTableExtractor()
-    return extractor.extract_from_jsonl(chunks_path)
-
-
-def count_tables_in_chunk(rec: Dict[str, Any]) -> int:
-    return FigureTableExtractor().count_tables_in_chunk(rec)
-
-
-def title_looks_like_table(t: Optional[str]) -> bool:
-    return bool(re.match(r"^\s*Table\s+\d+", (t or ""), flags=re.IGNORECASE))
-
-
+# ---- Orchestrator ----
 class Orchestrator:
-    """Orchestrates ToC extraction, chunking, validation and Excel reporting.
-
-    The class delegates heavy work to injected callables (cmd_toc / cmd_chunk)
-    and helper functions (load_toc / load_chunks / match_sections). Tests should
-    inject mocks for those dependencies. Implemented __str__ & __eq__ for
-    easier inspection during tests.
-    """
+    """Orchestrates ToC extraction, chunking, validation and Excel reporting."""
 
     def __init__(
         self,
-        cmd_toc_fn: Callable[..., None] = cmd_toc,
-        cmd_chunk_fn: Callable[..., None] = cmd_chunk,
+        cmd_toc_fn: Optional[Callable[..., None]] = None,
+        cmd_chunk_fn: Optional[Callable[..., None]] = None,
         load_toc_fn: Callable[[str], list] = load_toc,
         load_chunks_fn: Callable[[str], list] = load_chunks,
         match_sections_fn: Callable[..., tuple] = match_sections,
@@ -267,11 +259,22 @@ class Orchestrator:
         )
         self.excel_writer: AbstractWriter = excel_writer or ExcelWriter()
 
+        if self.cmd_toc_fn is None or self.cmd_chunk_fn is None:
+            try:
+                from src.run import cmd_toc, cmd_chunk  
+            except Exception:
+                LOG.debug("Could not import cmd_toc/cmd_chunk from src.run during Orchestrator init.")
+            else:
+                if self.cmd_toc_fn is None:
+                    self.cmd_toc_fn = cmd_toc
+                if self.cmd_chunk_fn is None:
+                    self.cmd_chunk_fn = cmd_chunk 
+
         if any(
             fn is None
             for fn in (
-                cmd_toc_fn,
-                cmd_chunk_fn,
+                self.cmd_toc_fn,
+                self.cmd_chunk_fn,
                 load_toc_fn,
                 load_chunks_fn,
                 match_sections_fn,
@@ -293,6 +296,20 @@ class Orchestrator:
             and self.excel_writer == other.excel_writer
         )
 
+    def _ensure_cmds_bound(self) -> None:
+        """Ensure cmd_toc_fn and cmd_chunk_fn are bound (try lazy import as last resort)."""
+        if self.cmd_toc_fn is not None and self.cmd_chunk_fn is not None:
+            return
+        try:
+            from src.run import cmd_toc, cmd_chunk  
+        except Exception:
+            LOG.debug("Lazy import of cmd_toc/cmd_chunk from src.run failed during execution.")
+        else:
+            if self.cmd_toc_fn is None:
+                self.cmd_toc_fn = cmd_toc 
+            if self.cmd_chunk_fn is None:
+                self.cmd_chunk_fn = cmd_chunk  
+
     def run_toc(
         self, pdf: str, toc_pages: Optional[str], doc_title: str, out_path: str
     ) -> None:
@@ -305,43 +322,39 @@ class Orchestrator:
             strip_dot_leaders=True,
         )
         LOG.info("Running ToC extraction -> %s", out_path)
+
+        self._ensure_cmds_bound()
+
         if self.cmd_toc_fn is None:
-            raise RuntimeError("cmd_toc function not available")
+            LOG.error("cmd_toc_fn is not available when attempting run_toc")
+            raise RuntimeError(
+                "cmd_toc function not available; provide it during Orchestrator construction or ensure src.run exposes cmd_toc"
+            )
         self.cmd_toc_fn(ns)
 
     def run_chunk(self, pdf: str, toc_path: str, out_path: str) -> None:
         ns = SimpleNamespace(pdf=pdf, toc=toc_path, out=out_path)
         LOG.info("Running chunk extraction -> %s", out_path)
+
+
+        self._ensure_cmds_bound()
+
         if self.cmd_chunk_fn is None:
-            raise RuntimeError("cmd_chunk function not available")
+            LOG.error("cmd_chunk_fn is not available when attempting run_chunk")
+            raise RuntimeError(
+                "cmd_chunk function not available; provide it during Orchestrator construction or ensure src.run exposes cmd_chunk"
+            )
         self.cmd_chunk_fn(ns)
 
-    def write_validation_xls_from_validate(
-        self, toc_path: str, chunks_path: str, xls_path: str, pdf_path: str
-    ) -> None:
-        LOG.info("Loading ToC from %s", toc_path)
-        toc = self.load_toc_fn(toc_path)
-        LOG.info("Loading chunks from %s", chunks_path)
-        chunks = self.load_chunks_fn(chunks_path)
-
-        missing, extra, out_of_order, matched = self.match_sections_fn(
-            toc, chunks, fuzzy_threshold=0.90, prefer_section_id=True
-        )
-
-        report = self.validationreport(
-            toc_section_count=len(toc),
-            parsed_section_count=len(chunks),
-            missing_sections=missing,
-            extra_sections=extra,
-            out_of_order_sections=out_of_order,
-            matched_sections=matched,
-        )
-
-        figs_toc, tabs_toc = self.figure_table_extractor.extract_from_pdf(pdf_path)
-        figs_chunks, tabs_chunks = self.figure_table_extractor.extract_from_jsonl(
-            chunks_path
-        )
-
+    def _build_report_dataframes(
+        self,
+        report: ValidationReport,
+        figs_toc: Set[str],
+        tabs_toc: Set[str],
+        figs_chunks: Set[str],
+        tabs_chunks: Set[str],
+    ) -> Dict[str, pd.DataFrame]:
+        """Return a dict of sheet_name -> DataFrame for the validation Excel."""
         fig_matched = len(figs_toc & figs_chunks)
         tab_matched = len(tabs_toc & tabs_chunks)
         fig_missing = sorted(figs_toc - figs_chunks)
@@ -370,44 +383,59 @@ class Orchestrator:
         ]
         overview_df = pd.DataFrame(overview_rows, columns=["Metric", "Value"])
 
-        missing_df = pd.DataFrame({"section": report.missing_sections})
-        extra_df = pd.DataFrame({"section": report.extra_sections})
-        ooo_df = pd.DataFrame({"section": report.out_of_order_sections})
-        matched_df = pd.DataFrame({"section": report.matched_sections})
-
-        miss_fig_df = pd.DataFrame({"figure_id_missing": fig_missing})
-        miss_tab_df = pd.DataFrame({"table_id_missing": tab_missing})
-        extra_fig_df = pd.DataFrame({"figure_id_extra": fig_extra})
-        extra_tab_df = pd.DataFrame({"table_id_extra": tab_extra})
-
-        target_path = Path(xls_path)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
         sheets = {
             "Overview": overview_df,
-            "MissingSections": missing_df,
-            "ExtraSections": extra_df,
-            "OutOfOrder": ooo_df,
-            "MatchedSections": matched_df,
-            "MissingFigureIDs": miss_fig_df,
-            "MissingTableIDs": miss_tab_df,
-            "ExtraFigureIDs": extra_fig_df,
-            "ExtraTableIDs": extra_tab_df,
+            "MissingSections": pd.DataFrame({"section": report.missing_sections}),
+            "ExtraSections": pd.DataFrame({"section": report.extra_sections}),
+            "OutOfOrder": pd.DataFrame({"section": report.out_of_order_sections}),
+            "MatchedSections": pd.DataFrame({"section": report.matched_sections}),
+            "MissingFigureIDs": pd.DataFrame({"figure_id_missing": fig_missing}),
+            "MissingTableIDs": pd.DataFrame({"table_id_missing": tab_missing}),
+            "ExtraFigureIDs": pd.DataFrame({"figure_id_extra": fig_extra}),
+            "ExtraTableIDs": pd.DataFrame({"table_id_extra": tab_extra}),
         }
+        return sheets
 
+    def _safe_write_excel(self, xls_path: str, sheets: Dict[str, pd.DataFrame]) -> None:
+        """Attempt to write Excel file and fall back to timestamped alternate on PermissionError."""
+        target_path = Path(xls_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._write_excel_with_autofit(xls_path, sheets)
             LOG.info("Wrote validation Excel -> %s", xls_path)
         except PermissionError:
-            alt = (
-                target_path.parent
-                / f"ValidationReport_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
-            )
-            LOG.warning(
-                "Could not write %s (maybe file open). Writing to %s", xls_path, alt
-            )
+            alt = target_path.parent / f"ValidationReport_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            LOG.warning("Could not write %s (maybe file open). Writing to %s", xls_path, alt)
             self._write_excel_with_autofit(str(alt), sheets)
             LOG.info("Wrote validation Excel -> %s", alt)
+
+    def write_validation_xls_from_validate(
+        self, toc_path: str, chunks_path: str, xls_path: str, pdf_path: str
+    ) -> None:
+        """Load ToC & chunks, validate, extract figure/table IDs and write Excel report."""
+        LOG.info("Loading ToC from %s", toc_path)
+        toc = self.load_toc_fn(toc_path)
+        LOG.info("Loading chunks from %s", chunks_path)
+        chunks = self.load_chunks_fn(chunks_path)
+
+        missing, extra, out_of_order, matched = self.match_sections_fn(
+            toc, chunks, fuzzy_threshold=0.90, prefer_section_id=True
+        )
+
+        report = self.validationreport(
+            toc_section_count=len(toc),
+            parsed_section_count=len(chunks),
+            missing_sections=missing,
+            extra_sections=extra,
+            out_of_order_sections=out_of_order,
+            matched_sections=matched,
+        )
+
+        figs_toc, tabs_toc = self.figure_table_extractor.extract_from_pdf(pdf_path)
+        figs_chunks, tabs_chunks = self.figure_table_extractor.extract_from_jsonl(chunks_path)
+        sheets = self._build_report_dataframes(report, figs_toc, tabs_toc, figs_chunks, tabs_chunks)
+
+        self._safe_write_excel(xls_path, sheets)
 
     def _write_excel_with_autofit(
         self, target: str | Path, sheets: Dict[str, pd.DataFrame]
@@ -436,7 +464,6 @@ class Orchestrator:
         LOG.info("[3/3] Validation Excel -> %s", xls_path)
         return str(toc_path), str(chunks_path), str(xls_path)
 
-
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -458,10 +485,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     orchestrator = Orchestrator()
     try:
         orchestrator.run_all(
-            pdf=args.pdf,
-            doc_title=args.doc_title,
-            outdir=args.outdir,
-            toc_pages=args.toc_pages,
+            pdf=args.pdf, doc_title=args.doc_title, outdir=args.outdir, toc_pages=args.toc_pages
         )
         return 0
     except Exception:
