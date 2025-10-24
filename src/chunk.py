@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import re
 import json
+import re
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import (
+    Dict,
     List,
-    Tuple,
     Optional,
     Set,
-    Dict,
+    Tuple,
 )
 
-from src.models import Chunk, ToCEntry, Caption
-from src.utils import normalize_text, strip_dot_leaders, looks_like_heading
-from abc import ABC, abstractmethod
+from src.models import Caption, Chunk, ToCEntry
+from src.utils import looks_like_heading, normalize_text, strip_dot_leaders
 
 
 class PDFRegexes:
-    """Encapsulate all PDF-related regex patterns."""
+    """Encapsulate PDF-related regex patterns used throughout the module."""
 
     SEP = r"[.\:\-\u2010\u2011\u2012\u2013\u2014\u2212]"
     ID = r"(?:(?:\d+|[A-Z])(?:\.\d+)*[a-z]?)"
@@ -41,8 +41,11 @@ class PDFRegexes:
     TABLE_FIGURE_LOOKAHEAD = r"(?=(?:\s*[A-Z]\.)|\s*\d)"
 
 
+    HEADING_RE = re.compile(r"^\s*(?P<num>(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\s+(?P<title>.+?)\s*$")
+
+
 class AbstractCleaner(ABC):
-    """Abstract contract for cleaning/normalization logic."""
+    """Contract for cleaning/normalization logic."""
 
     @abstractmethod
     def norm_caption_line(self, s: str) -> str:
@@ -66,7 +69,7 @@ class AbstractCleaner(ABC):
 
 
 class Cleaner(AbstractCleaner):
-    """Encapsulate all text cleaning utilities."""
+    """Text cleaning utilities used when building chunks."""
 
     def __init__(self) -> None:
         self.regex = PDFRegexes()
@@ -75,9 +78,7 @@ class Cleaner(AbstractCleaner):
         return "Cleaner()"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Cleaner):
-            return NotImplemented
-        return True  # stateless equality; adapt if stateful
+        return isinstance(other, Cleaner)
 
     def norm_caption_line(self, s: str) -> str:
         s = self.regex.NBSP_FIX.sub(" ", s)
@@ -85,6 +86,7 @@ class Cleaner(AbstractCleaner):
 
         s = re.sub(r"(?i)\bT\s*a\s*b\s*l\s*e\b", "Table", s)
         s = re.sub(r"(?i)\bF\s*i\s*g\s*u\s*r\s*e\b", "Figure", s)
+
         s = re.sub(rf"(?i)(Table){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = re.sub(rf"(?i)(Figure){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = self.regex.MULTI_SPACE_RE.sub(" ", s).strip()
@@ -99,20 +101,20 @@ class Cleaner(AbstractCleaner):
         )
 
     def clean_content(self, text: str) -> str:
+        """Normalize PDF-extracted page content into readable chunk content."""
         if not text:
             return ""
 
-        for b in ("","", "●", "▪", "", "", "", "•"):
+
+        for b in ("", "", "●", "▪", "", "", "", "•"):
             text = text.replace(b, "- ")
 
         text = re.sub(r"(\S)-\n([a-z])", r"\1\2", text)
-        text = re.sub(
-            r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)", r"\1 \2", text
-        )
-        text = text.replace('\\"', '"')
-        text = text.replace("\\'", "'")
+        text = re.sub(r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)", r"\1 \2", text)
+        text = text.replace('\\"', '"').replace("\\'", "'")
         text = re.sub(r"(?<!\w)/(?!\w)", "", text)
 
+        # Add space between camelCase-like joins
         text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
         text = re.sub(r'\s*"([^"]+)"\s*', r' "\1" ', text)
 
@@ -124,7 +126,6 @@ class Cleaner(AbstractCleaner):
             s = PDFRegexes.MULTI_SPACE_RE.sub(" ", s).strip()
             if s:
                 cleaned_lines.append(s)
-
 
         return "\n".join(cleaned_lines).strip()
 
@@ -144,7 +145,7 @@ class Cleaner(AbstractCleaner):
 
 
 class HeadingDetector:
-    """Encapsulate heading detection logic."""
+    """Detect headings in page text using heuristics and Cleaner."""
 
     def __init__(self, cleaner: AbstractCleaner):
         self.cleaner = cleaner
@@ -160,9 +161,8 @@ class HeadingDetector:
 
     def _heading_is_noisy(self, line: str, title: str) -> bool:
         for pat in self.noise_patterns:
-            if isinstance(pat, re.Pattern):
-                if pat.search(title) or pat.search(line):
-                    return True
+            if pat.search(title) or pat.search(line):
+                return True
         if self.cleaner.looks_like_running_header_noisy(title):
             return True
         if not re.search(r"[A-Za-z]", title):
@@ -213,7 +213,7 @@ class HeadingDetector:
 
 
 class AbstractChunkBuilder(ABC):
-    """Abstract contract for building chunks from pages/ToC."""
+    """Contract for chunk building and output writer."""
 
     @abstractmethod
     def build_chunks_from_toc(
@@ -244,7 +244,7 @@ class AbstractChunkBuilder(ABC):
 
 
 class ChunkBuilder(AbstractChunkBuilder):
-    """Encapsulate chunk building from TOC or headings."""
+    """Build chunks from pages using ToC or detected headings."""
 
     def __init__(self, cleaner: AbstractCleaner, detector: HeadingDetector):
         self.cleaner = cleaner
@@ -254,10 +254,12 @@ class ChunkBuilder(AbstractChunkBuilder):
         return f"ChunkBuilder(cleaner={self.cleaner}, detector={self.detector})"
 
     def _filter_content_line(self, line: str) -> bool:
+        """Decide whether a line should be included in chunk content."""
         s = line.strip()
         if re.search(r"\b(Table|Figure)\b", s, re.IGNORECASE):
             return True
         if re.match(r"^\d+(?:\.\d+)*\s+.+", s):
+
             return False
         if PDFRegexes.USB_SPEC_PATTERN.search(s):
             return False
@@ -284,13 +286,28 @@ class ChunkBuilder(AbstractChunkBuilder):
             figures=[],
         )
 
+    def _lines_for_page_range(
+        self, page_map: Dict[int, str], pstart: int, pend: int, skip_pages: Set[int]
+    ) -> List[str]:
+        """Gather and filter lines across a page range."""
+        lines: List[str] = []
+        for p in range(pstart, pend + 1):
+            if p in skip_pages:
+                continue
+            page_text = page_map.get(p, "")
+            for line in page_text.splitlines():
+                if self._filter_content_line(line):
+                    lines.append(line)
+        return lines
+
     def enrich_with_figures_tables(self, chunks: List[Chunk]) -> None:
+        """Populate Chunk.figures and Chunk.tables by scanning content for captions."""
         for ch in chunks:
-            ch.figures, ch.tables = [], []
+            ch.figures = []
+            ch.tables = []
             if not ch.content:
                 continue
-            lines = ch.content.splitlines()
-            for line in lines:
+            for line in ch.content.splitlines():
                 ln = self.cleaner.norm_caption_line(line)
                 if m := PDFRegexes.FIGURE_RE.search(ln):
                     ch.figures.append(Caption(id=m.group(1)))
@@ -304,6 +321,7 @@ class ChunkBuilder(AbstractChunkBuilder):
         toc_entries: List[ToCEntry],
         skip_pages: Optional[Set[int]] = None,
     ) -> List[Chunk]:
+        """Build chunks by slicing PDF pages according to ToC entries."""
         skip_pages = skip_pages or set()
         page_map = dict(pages)
         entries_sorted = sorted(toc_entries, key=lambda e: e.page)
@@ -322,13 +340,7 @@ class ChunkBuilder(AbstractChunkBuilder):
 
         chunks: List[Chunk] = []
         for pstart, pend, sec, title in bounds:
-            lines = [
-                line
-                for p in range(pstart, pend + 1)
-                if p not in skip_pages
-                for line in page_map.get(p, "").splitlines()
-                if self._filter_content_line(line)
-            ]
+            lines = self._lines_for_page_range(page_map, pstart, pend, skip_pages)
             chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
 
         self.enrich_with_figures_tables(chunks)
@@ -344,6 +356,7 @@ class ChunkBuilder(AbstractChunkBuilder):
         skip_pages: Optional[Set[int]] = None,
         toc_map: Optional[Dict[str, str]] = None,
     ) -> List[Chunk]:
+        """Build chunks by detecting headings in the pages and slicing around those headings."""
         skip_pages = skip_pages or set()
         heads = self.detector.detect_headings(
             pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map
@@ -352,8 +365,9 @@ class ChunkBuilder(AbstractChunkBuilder):
             return []
 
         last_page = pages[-1][0]
+
         heads_sorted = sorted(
-            heads, key=lambda x: (tuple(map(int, x[1].split("."))), x[0])
+            heads, key=lambda x: (tuple(int(p) for p in x[1].split(".")), x[0])
         )
 
         bounds: List[Tuple[int, int, str, str]] = []
@@ -366,13 +380,7 @@ class ChunkBuilder(AbstractChunkBuilder):
         page_map = dict(pages)
         chunks: List[Chunk] = []
         for pstart, pend, sec, title in bounds:
-            lines = [
-                line
-                for p in range(pstart, pend + 1)
-                if p not in skip_pages
-                for line in page_map.get(p, "").splitlines()
-                if self._filter_content_line(line)
-            ]
+            lines = self._lines_for_page_range(page_map, pstart, pend, skip_pages)
             chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
 
         self.enrich_with_figures_tables(chunks)
@@ -382,16 +390,20 @@ class ChunkBuilder(AbstractChunkBuilder):
         return chunks
 
     def write_jsonl(self, chunks: List[Chunk], out_path: str) -> int:
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        """Write chunks to a JSONL file. Page ranges are converted to lists when possible."""
+        out_file = Path(out_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
         count = 0
-        with open(out_path, "w", encoding="utf-8") as f:
+        with out_file.open("w", encoding="utf-8") as fh:
             for c in chunks:
-                pr_list = []
+                # Safely parse page_range "start,end" into a list of ints when possible
+                pr_list: List[int] = []
                 try:
-                    pr_list = [int(x) for x in c.page_range.split(",")]
+                    parts = [p.strip() for p in (c.page_range or "").split(",") if p.strip()]
+                    pr_list = [int(x) for x in parts] if parts else []
                 except Exception:
-                    # fallback: leave empty list
                     pr_list = []
+
                 obj = {
                     "section_path": c.section_path,
                     "start_heading": f"{c.section_id} {c.title}",
@@ -400,11 +412,9 @@ class ChunkBuilder(AbstractChunkBuilder):
                     "figures": [f"Figure {fg.id}" for fg in (c.figures or [])],
                     "page_range": pr_list,
                 }
-                json.dump(obj, f, ensure_ascii=False)
-                f.write("\n")
+                fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
                 count += 1
         return count
-
 
 _cleaner: AbstractCleaner = Cleaner()
 _detector = HeadingDetector(_cleaner)
@@ -444,3 +454,4 @@ def normalize_sentences(text: str) -> str:
 
 def write_jsonl(chunks: List[Chunk], out_path: str) -> int:
     return _builder.write_jsonl(chunks, out_path)
+
