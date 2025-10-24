@@ -16,10 +16,12 @@ class AbstractReportGenerator(ABC):
 
     @abstractmethod
     def generate(self) -> Dict[str, Any]:
+        """Generate the report as a dictionary."""
         raise NotImplementedError
 
     @abstractmethod
     def write(self, out_path: str) -> None:
+        """Write the report to a file."""
         raise NotImplementedError
 
 
@@ -29,10 +31,18 @@ class FinalReport(AbstractReportGenerator):
     combining ValidationReport and metrics data.
     """
 
-    def __init__(self, val: ValidationReport, metrics: Dict[str, Any]):
+    def __init__(
+        self,
+        val: ValidationReport,
+        metrics: Dict[str, Any],
+        max_discrepancies: int = 200,
+        max_missing_sections: int = 50,
+    ):
         self._val = val
         self._metrics = metrics
         self._report: Dict[str, Any] = {}
+        self._max_discrepancies = max_discrepancies
+        self._max_missing_sections = max_missing_sections
 
     def __str__(self) -> str:
         return (
@@ -61,6 +71,7 @@ class FinalReport(AbstractReportGenerator):
             json.dump(self._report, f, ensure_ascii=False, indent=2)
         LOG.info("Wrote final report to %s", out_path)
 
+
     def _compute_summary(self) -> None:
         matched = len(self._val.matched_sections)
         total = self._val.toc_section_count
@@ -75,18 +86,19 @@ class FinalReport(AbstractReportGenerator):
             *(f"Extra (not in ToC): {s}" for s in self._val.extra_sections),
             *(f"Out of order: {s}" for s in self._val.out_of_order_sections),
         ]
-        self._report["discrepancies"] = discrepancies[:200]
+        self._report["discrepancies"] = discrepancies[: self._max_discrepancies]
 
         self._report["metrics"] = {
             "toc_sections": self._metrics.get("total_sections"),
             "parsed_sections": self._val.parsed_section_count,
             "figures": self._metrics.get("total_figures"),
             "tables": self._metrics.get("total_tables"),
-            "missing_sections": self._val.missing_sections[:50],
+            "missing_sections": self._val.missing_sections[: self._max_missing_sections],
         }
 
     def _generate_recommendations(self) -> None:
         recs: List[str] = []
+
         if self._val.missing_sections:
             recs.append(
                 "Re-parse pages around missing sections; verify ToC page bounds and OCR."
@@ -100,6 +112,7 @@ class FinalReport(AbstractReportGenerator):
             recs.append(
                 "Figure/Table captions may be missed—relax caption regex or post-OCR cleanup."
             )
+
         avg_tokens = self._metrics.get("avg_tokens_per_section", 0)
         if avg_tokens < 300:
             recs.append(
@@ -109,22 +122,31 @@ class FinalReport(AbstractReportGenerator):
             recs.append(
                 "Very large chunks; consider splitting by subheadings or page breaks."
             )
+
         self._report["recommendations"] = recs
 
 
-_report_generator: Optional[AbstractReportGenerator] = None
+def generate_report(
+    val: ValidationReport,
+    metrics: Dict[str, Any],
+    max_discrepancies: int = 200,
+    max_missing_sections: int = 50,
+) -> FinalReport:
+    """
+    Create and generate a FinalReport instance.
+    Returns the instance for further use (writing, inspection).
+    """
+    report = FinalReport(val, metrics, max_discrepancies, max_missing_sections)
+    report.generate()
+    return report
 
 
-def generate_report(val: ValidationReport, metrics: Dict[str, Any]) -> Dict[str, Any]:
-    """Convenience wrapper for module-level report generation."""
-    global _report_generator
-    _report_generator = FinalReport(val, metrics)
-    return _report_generator.generate()
-
-
-def write_report(out_path: str) -> None:
-    """Convenience wrapper for module-level report writing."""
-    if _report_generator is None:
-        LOG.warning("No report generated yet. Call generate_report() first.")
+def write_report(report: FinalReport, out_path: str) -> None:
+    """
+    Write a previously generated FinalReport instance to a JSON file.
+    """
+    if not report:
+        LOG.warning("No report instance provided.")
         return
-    _report_generator.write(out_path)
+    report.write(out_path)
+
