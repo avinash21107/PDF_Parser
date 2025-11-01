@@ -4,7 +4,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Dict
+from typing import Iterable, List, Tuple, Dict, Optional
 
 from src.logger import get_logger
 from src.models import ToCEntry
@@ -12,10 +12,8 @@ from src.utils import normalize_text, strip_dot_leaders
 
 LOG = get_logger(__name__)
 
-# Leader characters that often appear as dot leaders in ToC lines.
 _LEADER_CHARS = r"\.\u00B7\u2022\u2024\u2026"
 
-# Matches typical ToC lines such as "1.2 Section title ...... 12"
 TOC_LINE_RE = re.compile(
     r"^\s*(?P<section>(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\s+"
     r"(?P<title>.+?)\s*"
@@ -23,17 +21,11 @@ TOC_LINE_RE = re.compile(
     r"(?P<page>\d{1,5})\s*$"
 )
 
-# Matches heading-number followed by title (to strip initial numbering from titles)
-HEADING_NUM_TITLE_RX = re.compile(
-    r"^\s*(?:\d+|[A-Z])(?:[.\-]\d+)*\s+(?P<title>.+?)\s*$"
-)
-
-# Runs used to remove long sequences of dot leaders or isolated-letter noise
+HEADING_NUM_TITLE_RX = re.compile(r"^\s*(?:\d+|[A-Z])(?:[.\-]\d+)*\s+(?P<title>.+?)\s*$")
 DOT_LEADERS_RX = re.compile(r"(?:\s*[" + _LEADER_CHARS + r"]\s*){3,}")
 ISOLATED_LETTERS_RUN_RX = re.compile(r"(?:\b[A-Za-z]\b[.\s]*){6,}")
 MULTI_SPACE_RE = re.compile(r"\s{2,}")
 
-# Lowercase tokens that commonly appear in product-brand headings and may be noisy.
 BRAND_TOKENS = {
     "universal",
     "serial",
@@ -45,14 +37,12 @@ BRAND_TOKENS = {
     "page",
 }
 
-# Special-case section overrides used historically by the project.
 _SPECIAL_SECTIONS: Dict[str, Tuple[str, int]] = {
     "10": ("Power Rules", 995),
 }
 
-
 def _is_appendix(section_id: str) -> bool:
-    """Return True if section id represents an appendix (starts with letter)."""
+    """Return True if section id represents an appendix (starts with a letter)."""
     return bool(section_id) and section_id[0].isalpha()
 
 
@@ -66,7 +56,6 @@ def _section_sort_key(section_id: str) -> Tuple[int, ...]:
     """
     parts = section_id.split(".")
     if _is_appendix(section_id):
-        # Convert 'A' -> 1, 'B' -> 2, etc.
         head = (ord(parts[0]) - ord("A") + 1,)
         tail = tuple(int(p) for p in parts[1:] if p.isdigit())
         return (1, *head, *tail)
@@ -84,12 +73,10 @@ def _ensure_parent_entries(entries: List[ToCEntry], doc_title: str) -> List[ToCE
 
     for e in entries:
         sid = e.section_id
-        # Walk up the hierarchy collecting earliest page per parent id
         while "." in sid:
             sid = sid.rsplit(".", 1)[0]
             earliest_page[sid] = min(earliest_page.get(sid, e.page), e.page)
 
-    # Create parent entries for missing parents
     for pid, pg in earliest_page.items():
         if pid in by_id:
             continue
@@ -119,22 +106,18 @@ class AbstractToCParser(ABC):
         min_dots: int = 0,
         strip_dots: bool = False,
     ) -> List[ToCEntry]:
-        """Parse an iterable of text lines and return ToCEntry objects."""
         raise NotImplementedError
 
 
 class ToCParser(AbstractToCParser):
     """Parser for Table-of-Contents lines.
 
-    The parser is intentionally lightweight and stateless — all state is local
-    to method calls, which makes the class easy to test and mock.
+    Stateless and focused on transforming raw lines into ToCEntry dataclasses.
     """
 
     def __init__(self) -> None:
-        # Stateless initialiser for potential future configuration.
         pass
 
-    # ---- Internal helpers ----
     def _clean_title(self, raw_title: str) -> str:
         """Remove dot-leaders, numeric prefixes and collapse excess spacing."""
         t = strip_dot_leaders(raw_title or "")
@@ -157,15 +140,12 @@ class ToCParser(AbstractToCParser):
     def _is_valid_toc_line(self, s: str) -> bool:
         """Reject header lines like 'Table of Contents' and lists-of-..."""
         s_low = s.lower()
-        return not s_low.startswith(
-            ("table of contents", "list of figures", "list of tables")
-        )
+        return not s_low.startswith(("table of contents", "list of figures", "list of tables"))
 
     def _should_include_section(self, section_id: str, min_dots: int) -> bool:
         """Decide whether to include a section ID based on min_dots or appendix flag."""
         return _is_appendix(section_id) or section_id.count(".") >= min_dots
 
-    # ---- Public API ----
     def parse_lines(
         self,
         lines: Iterable[str],
@@ -178,13 +158,13 @@ class ToCParser(AbstractToCParser):
 
         Parameters
         ----------
-        lines
-            Iterable of raw lines (strings) extracted from the PDF's ToC pages.
-        doc_title
+        lines : Iterable[str]
+            Raw ToC text lines from PDF ToC pages.
+        doc_title : str
             Document title to attach to each ToCEntry.
-        min_dots
+        min_dots : int
             Minimum number of dotted levels required (e.g., 1 to require '1.x').
-        strip_dots
+        strip_dots : bool
             Whether to strip dot leaders prior to parsing.
         """
         entries: List[ToCEntry] = []
@@ -202,7 +182,6 @@ class ToCParser(AbstractToCParser):
             if not self._should_include_section(section_id, min_dots):
                 continue
 
-            # Allow project-specific overrides
             if section_id in _SPECIAL_SECTIONS:
                 raw_title, page = _SPECIAL_SECTIONS[section_id]
             else:
@@ -225,13 +204,10 @@ class ToCParser(AbstractToCParser):
                 )
             )
 
-        # Ensure parent entries exist, then sort consistently
         entries = _ensure_parent_entries(entries, doc_title)
         entries.sort(key=lambda e: (_section_sort_key(e.section_id), e.page))
         return entries
 
-
-# Module-level parser (swap-able in tests)
 _parser: AbstractToCParser = ToCParser()
 
 
@@ -252,13 +228,9 @@ def parse_toc_lines(
     Returns an empty list and logs an error if parsing fails.
     """
     try:
-        return _parser.parse_lines(
-            lines, doc_title=doc_title, min_dots=min_dots, strip_dots=strip_dots
-        )
-    except Exception as exc:  # pragma: no cover - defensive logging on unexpected errors
-        LOG.error(
-            "parse_toc_lines failed for doc_title=%r: %s", doc_title, exc, exc_info=True
-        )
+        return _parser.parse_lines(lines, doc_title=doc_title, min_dots=min_dots, strip_dots=strip_dots)
+    except Exception as exc:
+        LOG.error("parse_toc_lines failed for doc_title=%r: %s", doc_title, exc, exc_info=True)
         return []
 
 
@@ -273,4 +245,3 @@ def write_jsonl(entries: List[ToCEntry], out_path: str) -> int:
             count += 1
     LOG.info("Wrote %d ToC entries to %s", count, out_path)
     return count
-
