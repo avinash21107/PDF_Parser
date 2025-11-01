@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import importlib
 from pathlib import Path
 
 import pandas as pd
@@ -27,7 +28,6 @@ ID_STRICT_RE = re.compile(r"(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)[a-z]?")
 TABLE_RX = re.compile(r"\bTable\s+\d+(?:\.\d+)?", re.IGNORECASE)
 
 
-# ---- helpers for JSONL streaming ----
 def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     """Yield parsed JSON objects from a JSONL file (memory-friendly stream)."""
     with path.open("r", encoding="utf-8") as fh:
@@ -41,6 +41,7 @@ def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
     """Compatibility helper: read entire JSONL into a list (kept for API compatibility)."""
     return list(iter_jsonl(path))
+
 
 class AbstractExtractor(ABC):
     """Abstract base class for figure/table extractors."""
@@ -83,7 +84,7 @@ class FigureTableExtractor(AbstractExtractor):
         self.id_strict_re = ID_STRICT_RE
         self.table_rx = TABLE_RX
 
-    def __str__(self) -> str: 
+    def __str__(self) -> str:  # polymorphic representation
         return f"FigureTableExtractor(reader={getattr(self.reader_cls, '__name__', str(self.reader_cls))})"
 
     def __eq__(self, other: object) -> bool:
@@ -152,6 +153,7 @@ class FigureTableExtractor(AbstractExtractor):
         txt = rec.get("content") or rec.get("text") or ""
         return len(self.table_rx.findall(str(txt)))
 
+
 def _extract_text_range(reader: PdfReader, start_idx: int, end_idx_excl: int) -> str:
     return FigureTableExtractor()._extract_text_range(reader, start_idx, end_idx_excl)
 
@@ -180,6 +182,7 @@ def count_tables_in_chunk(rec: Dict[str, Any]) -> int:
 
 def title_looks_like_table(t: Optional[str]) -> bool:
     return bool(re.match(r"^\s*Table\s+\d+", (t or ""), flags=re.IGNORECASE))
+
 
 class AbstractWriter(ABC):
     """Abstract base class for writers (e.g. ExcelWriter)."""
@@ -231,7 +234,6 @@ class ExcelWriter(AbstractWriter):
                 self._autofit(wb[name])
 
 
-# ---- Orchestrator ----
 class Orchestrator:
     """Orchestrates ToC extraction, chunking, validation and Excel reporting."""
 
@@ -246,7 +248,6 @@ class Orchestrator:
         figure_table_extractor: Optional[AbstractExtractor] = None,
         excel_writer: Optional[AbstractWriter] = None,
     ) -> None:
-
         self.cmd_toc_fn = cmd_toc_fn
         self.cmd_chunk_fn = cmd_chunk_fn
         self.load_toc_fn = load_toc_fn
@@ -261,14 +262,15 @@ class Orchestrator:
 
         if self.cmd_toc_fn is None or self.cmd_chunk_fn is None:
             try:
-                from src.run import cmd_toc, cmd_chunk  
-            except Exception:
-                LOG.debug("Could not import cmd_toc/cmd_chunk from src.run during Orchestrator init.")
-            else:
+                run_mod = importlib.import_module("src.run")
+            except Exception as exc:
+                LOG.debug("Could not import src.run during Orchestrator init: %s", exc, exc_info=True)
+                run_mod = None
+            if run_mod is not None:
                 if self.cmd_toc_fn is None:
-                    self.cmd_toc_fn = cmd_toc
+                    self.cmd_toc_fn = getattr(run_mod, "cmd_toc", None)
                 if self.cmd_chunk_fn is None:
-                    self.cmd_chunk_fn = cmd_chunk 
+                    self.cmd_chunk_fn = getattr(run_mod, "cmd_chunk", None)
 
         if any(
             fn is None
@@ -296,20 +298,6 @@ class Orchestrator:
             and self.excel_writer == other.excel_writer
         )
 
-    def _ensure_cmds_bound(self) -> None:
-        """Ensure cmd_toc_fn and cmd_chunk_fn are bound (try lazy import as last resort)."""
-        if self.cmd_toc_fn is not None and self.cmd_chunk_fn is not None:
-            return
-        try:
-            from src.run import cmd_toc, cmd_chunk  
-        except Exception:
-            LOG.debug("Lazy import of cmd_toc/cmd_chunk from src.run failed during execution.")
-        else:
-            if self.cmd_toc_fn is None:
-                self.cmd_toc_fn = cmd_toc 
-            if self.cmd_chunk_fn is None:
-                self.cmd_chunk_fn = cmd_chunk  
-
     def run_toc(
         self, pdf: str, toc_pages: Optional[str], doc_title: str, out_path: str
     ) -> None:
@@ -323,8 +311,6 @@ class Orchestrator:
         )
         LOG.info("Running ToC extraction -> %s", out_path)
 
-        self._ensure_cmds_bound()
-
         if self.cmd_toc_fn is None:
             LOG.error("cmd_toc_fn is not available when attempting run_toc")
             raise RuntimeError(
@@ -335,9 +321,6 @@ class Orchestrator:
     def run_chunk(self, pdf: str, toc_path: str, out_path: str) -> None:
         ns = SimpleNamespace(pdf=pdf, toc=toc_path, out=out_path)
         LOG.info("Running chunk extraction -> %s", out_path)
-
-
-        self._ensure_cmds_bound()
 
         if self.cmd_chunk_fn is None:
             LOG.error("cmd_chunk_fn is not available when attempting run_chunk")
@@ -433,6 +416,7 @@ class Orchestrator:
 
         figs_toc, tabs_toc = self.figure_table_extractor.extract_from_pdf(pdf_path)
         figs_chunks, tabs_chunks = self.figure_table_extractor.extract_from_jsonl(chunks_path)
+
         sheets = self._build_report_dataframes(report, figs_toc, tabs_toc, figs_chunks, tabs_chunks)
 
         self._safe_write_excel(xls_path, sheets)
@@ -464,14 +448,13 @@ class Orchestrator:
         LOG.info("[3/3] Validation Excel -> %s", xls_path)
         return str(toc_path), str(chunks_path), str(xls_path)
 
+
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
-    ap = argparse.ArgumentParser(
-        description="USB-PD parser orchestrator (ToC + Chunks + XLS validation)"
-    )
+    ap = argparse.ArgumentParser(description="USB-PD parser orchestrator (ToC + Chunks + XLS validation)")
     ap.add_argument("--pdf", required=True, help="Path to the USB-PD PDF")
     ap.add_argument(
         "--doc-title", default="Universal Serial Bus Power Delivery Specification"
@@ -482,7 +465,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    orchestrator = Orchestrator()
+    cmd_toc_fn = None
+    cmd_chunk_fn = None
+    try:
+        run_mod = importlib.import_module("src.run")
+    except Exception as exc:
+        LOG.debug("Could not import src.run at CLI startup: %s", exc, exc_info=True)
+        run_mod = None
+    if run_mod is not None:
+        cmd_toc_fn = getattr(run_mod, "cmd_toc", None)
+        cmd_chunk_fn = getattr(run_mod, "cmd_chunk", None)
+        LOG.debug("Loaded cmd_toc=%s cmd_chunk=%s from src.run", bool(cmd_toc_fn), bool(cmd_chunk_fn))
+
+    orchestrator = Orchestrator(cmd_toc_fn=cmd_toc_fn, cmd_chunk_fn=cmd_chunk_fn)
     try:
         orchestrator.run_all(
             pdf=args.pdf, doc_title=args.doc_title, outdir=args.outdir, toc_pages=args.toc_pages
