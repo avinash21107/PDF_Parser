@@ -5,9 +5,9 @@ import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Set
 
-from Levenshtein import ratio as lev_ratio
+from difflib import SequenceMatcher
 from rich.console import Console
 from rich.table import Table
 
@@ -18,19 +18,16 @@ from src.utils import normalize_text, strip_dot_leaders
 LOG = get_logger(__name__)
 CONSOLE = Console()
 
-
 _ID_SEP = r"[.\-\u2010\u2011\u2012\u2013\u2014\u2212]"
 _ID_RX = rf"(?:[A-Z]{{1,3}}{_ID_SEP})?\d+(?:{_ID_SEP}\d+)*(?:[a-z])?"
 TABLE_STR_RX = re.compile(rf"(?i)\btable\s+({_ID_RX})\b")
 FIGURE_STR_RX = re.compile(rf"(?i)\bfigure\s+({_ID_RX})\b")
-
 
 FOOTER_BRAND_RX = re.compile(
     r"Universal\s+Serial\s+Bus\s+Power\s+Delivery\s+Specification.*?(Revision|Version).*$",
     re.IGNORECASE,
 )
 FOOTER_PAGE_RX = re.compile(r"\bPage\s*\d+\b", re.IGNORECASE)
-
 
 FUZZY_BRAND_RX = re.compile(
     r"U[\s.\-]*n[\s.\-]*i[\s.\-]*v[\s.\-]*e[\s.\-]*r[\s.\-]*s[\s.\-]*a"
@@ -48,16 +45,6 @@ NBSP_RX = re.compile(r"[\u00A0\u202F]")
 DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 HEADING_NUM_TITLE_RX = re.compile(r"^\s*\d+(?:[.\-]\d+)*\s+(?P<title>.+?)\s*$")
 
-
-def norm_id(s: str) -> str:
-    """Normalize various dash/nbsp characters and trim (preserve digits/letters)."""
-    if not s:
-        return ""
-    s = NBSP_RX.sub("", s)
-    s = DASH_RX.sub("-", s)
-    return s.strip()
-
-
 def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     """Yield parsed JSON objects from a JSONL file (streaming)."""
     with path.open("r", encoding="utf-8") as fh:
@@ -65,7 +52,45 @@ def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            try:
+                yield json.loads(line)
+            except Exception:
+                LOG.exception("Skipping malformed JSON line in %s: %s", path, line[:200])
+
+
+def _short_chunk_repr(obj: Dict[str, Any], max_title: int = 80) -> str:
+    """Compact single-line chunk summary safe for logging (never includes full content)."""
+    try:
+        sid = obj.get("section_id") or obj.get("section_path") or ""
+        title = str(obj.get("title") or "")
+        if len(title) > max_title:
+            title = title[: max_title - 3] + "..."
+        pr = obj.get("page_range") or obj.get("page") or ""
+        c_len = len(str(obj.get("content") or "")) if obj.get("content") else 0
+        tbls = len(obj.get("tables") or [])
+        figs = len(obj.get("figures") or [])
+        return f"Chunk(section_id={sid!r}, title={title!r}, pages={pr}, content_len={c_len}, tables={tbls}, figures={figs})"
+    except Exception:
+        return "Chunk(<unprintable>)"
+
+
+def _norm_id(s: str) -> str:
+    """Normalise dash/nbsp characters for section IDs (keeps digits/letters intact)."""
+    if not s:
+        return ""
+    s = NBSP_RX.sub("", s)
+    s = DASH_RX.sub("-", s)
+    return s.strip()
+
+
+def _lev_ratio(a: str, b: str) -> float:
+    """Try to use python-Levenshtein.ratio; fallback to difflib.SequenceMatcher if not installed."""
+    try:
+        from Levenshtein import ratio as lev_ratio_fn  # type: ignore
+
+        return lev_ratio_fn(a, b)
+    except Exception:
+        return SequenceMatcher(None, a, b).ratio()
 
 
 class AbstractValidator(ABC):
@@ -98,8 +123,10 @@ class Validator(AbstractValidator):
     """
     Validator handles loading ToC / chunk records, matching sections, and writing summary reports.
 
-    The class supports dependency injection for regexes and normalization helpers to make
-    unit testing and alternative behaviours easy.
+    Improvements:
+    - DI-friendly constructor.
+    - Optional noisy-chunk filtering via `skip_noisy_chunks` flag.
+    - Small helpers for coercion, caption parsing and chunk repr to avoid huge logs.
     """
 
     def __init__(
@@ -111,22 +138,24 @@ class Validator(AbstractValidator):
         fuzzy_brand_rx: re.Pattern = FUZZY_BRAND_RX,
         normalize_fn=normalize_text,
         strip_fn=strip_dot_leaders,
+        *,
+        skip_noisy_chunks: bool = False,
+        noisy_chunk_max_len: int = 10_000,
     ) -> None:
         self.table_rx = table_rx
         self.figure_rx = figure_rx
         self.footer_brand_rx = footer_brand_rx
         self.footer_page_rx = footer_page_rx
         self.fuzzy_brand_rx = fuzzy_brand_rx
-
-
         self.normalize = normalize_fn
         self.strip_dot_leaders = strip_fn
 
+        # optional behaviour toggles
+        self.skip_noisy_chunks = skip_noisy_chunks
+        self.noisy_chunk_max_len = noisy_chunk_max_len
+
     def __str__(self) -> str:
-        return "Validator(table_rx=%s, figure_rx=%s)" % (
-            getattr(self.table_rx, "pattern", "<regex>"),
-            getattr(self.figure_rx, "pattern", "<regex>"),
-        )
+        return f"Validator(table_rx={getattr(self.table_rx, 'pattern', '<rx>')}, skip_noisy={self.skip_noisy_chunks})"
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Validator):
@@ -134,48 +163,21 @@ class Validator(AbstractValidator):
         return (
             self.table_rx.pattern == other.table_rx.pattern
             and self.figure_rx.pattern == other.figure_rx.pattern
+            and self.skip_noisy_chunks == other.skip_noisy_chunks
         )
 
 
-    def clean_toc_title(self, title: str) -> str:
-        """
-        Clean and normalise ToC title strings for comparison and display.
-        Uses injected normalization helpers (default: normalize_text & strip_dot_leaders).
-        """
-        if not title:
-            return ""
-
-        s = self.normalize(title)
-        s = self.footer_brand_rx.sub("", s)
-        s = self.footer_page_rx.sub("", s)
-        s = self.fuzzy_brand_rx.sub("", s)
-        s = self.strip_dot_leaders(s)
-        s = ISOLATED_LETTERS_RUN_RX.sub("", s)
-        m = HEADING_NUM_TITLE_RX.match(s)
-        if m:
-            s = m.group("title")
-
-
-        s = re.sub(r"[,;]\s*(?:\d[\s.\-]*){2,}$", "", s)
-        s = re.sub(r"\s{2,}", " ", s).strip()
-
-        norm = re.sub(r"[\s.\-]+", "", s).lower()
-        if "universalserialbuspowerdeliveryspecification" in norm:
-            parts = s.split()
-            s = " ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
-
-        return s
-
     def load_toc(self, path: str) -> List[ToCEntry]:
-        """Load ToC entries from JSONL file and normalise titles (streaming)."""
+        """Load ToC entries from JSONL and normalise titles (streaming)."""
         vals: List[ToCEntry] = []
-        for obj in _iter_jsonl(Path(path)):
-            e = (
-                ToCEntry.model_validate(obj)
-                if isinstance(obj, dict)
-                else ToCEntry.model_validate_json(json.dumps(obj))
-            )
-            e.title = self.clean_toc_title(e.title)
+        p = Path(path)
+        for obj in _iter_jsonl(p):
+            try:
+                e = ToCEntry.model_validate(obj) if isinstance(obj, dict) else ToCEntry.model_validate_json(json.dumps(obj))
+            except Exception:
+                LOG.exception("Failed to parse ToC record (skipping): %s", str(obj)[:200])
+                continue
+            e.title = self._clean_toc_title(e.title)
             if not e.title or not re.search(r"[A-Za-z]", e.title):
                 continue
             vals.append(e)
@@ -183,28 +185,41 @@ class Validator(AbstractValidator):
         return vals
 
     def load_chunks(self, path: str) -> List[Chunk]:
-        """Load chunk records from JSONL, coercing older export formats to Chunk model (streaming)."""
+        """Load chunk records from JSONL, coerce legacy formats to Chunk model (streaming)."""
         items: List[Chunk] = []
-        for obj in _iter_jsonl(Path(path)):
-            items.append(self._load_single_chunk(obj))
+        p = Path(path)
+        for obj in _iter_jsonl(p):
+            try:
+                chunk = self._load_single_chunk(obj)
+            except Exception:
+                LOG.exception("Failed to coerce chunk record (skipping): %s", str(obj)[:200])
+                continue
+            if self.skip_noisy_chunks and self._is_noisy_chunk(chunk):
+                LOG.info("Skipping noisy chunk: %s", _short_chunk_repr(chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)))
+                continue
+            items.append(chunk)
         LOG.info("Loaded %d chunks from %s", len(items), path)
         return items
 
     def _load_single_chunk(self, obj: Dict[str, Any]) -> Chunk:
         """Coerce a JSON object into a Chunk model, accommodating legacy formats."""
-        if "title" in obj and "section_id" in obj and isinstance(obj.get("page_range"), str):
-            return Chunk.model_validate(obj)
-        return Chunk.model_validate(self._coerce_export_record_to_chunk(obj))
+        try:
+            if "title" in obj and "section_id" in obj and isinstance(obj.get("page_range"), str):
+                return Chunk.model_validate(obj)
+        except Exception:
+            LOG.debug("Preserving coercion path for chunk record (legacy-like)")
 
+        coerced = self._coerce_export_record_to_chunk(obj)
+        return Chunk.model_validate(coerced)
 
-    def _extract_chunk_info(self, obj: dict) -> Tuple[str, str, str, str, str]:
+    def _extract_chunk_info(self, obj: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
         """Return (section_path, section_id, title, page_range, content) for a legacy or modern chunk record."""
         section_path = obj.get("section_path") or obj.get("start_heading") or ""
         if " " in section_path:
             section_id, title = section_path.split(" ", 1)
         else:
             section_id = obj.get("section_id") or ""
-            title = obj.get("title") or section_path
+            title = obj.get("title") or section_path or ""
         content = obj.get("content", "")
         pr = obj.get("page_range", "")
         if isinstance(pr, list) and len(pr) == 2:
@@ -227,11 +242,8 @@ class Validator(AbstractValidator):
                     caps.append(Caption(id=m.group(1)))
         return caps
 
-    def _coerce_export_record_to_chunk(self, obj: dict) -> Dict[str, Any]:
-        """
-        Convert legacy export records into the Chunk-compatible dict expected by the model.
-        This function isolates the mapping logic so it can be unit-tested independently.
-        """
+    def _coerce_export_record_to_chunk(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert legacy export records into the Chunk-compatible dict expected by the model."""
         section_path, section_id, title, page_range, content = self._extract_chunk_info(obj)
         tables = self._to_captions(obj.get("tables"), self.table_rx)
         figures = self._to_captions(obj.get("figures"), self.figure_rx)
@@ -245,6 +257,42 @@ class Validator(AbstractValidator):
             "figures": [c.model_dump() for c in figures],
         }
 
+    def _clean_toc_title(self, title: str) -> str:
+        """Clean and normalise ToC title strings for comparison and display."""
+        if not title:
+            return ""
+        s = self.normalize(title)
+        s = self.footer_brand_rx.sub("", s)
+        s = self.footer_page_rx.sub("", s)
+        s = self.fuzzy_brand_rx.sub("", s)
+        s = self.strip_dot_leaders(s)
+        s = ISOLATED_LETTERS_RUN_RX.sub("", s)
+        m = HEADING_NUM_TITLE_RX.match(s)
+        if m:
+            s = m.group("title")
+        s = re.sub(r"[,;]\s*(?:\d[\s.\-]*){2,}$", "", s)
+        s = re.sub(r"\s{2,}", " ", s).strip()
+
+        norm = re.sub(r"[\s.\-]+", "", s).lower()
+        if "universalserialbuspowerdeliveryspecification" in norm:
+            parts = s.split()
+            s = " ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
+        return s
+
+    def _is_noisy_chunk(self, c: Chunk) -> bool:
+        """Heuristic to detect overly noisy chunk records."""
+        try:
+            content = getattr(c, "content", "") or ""
+            if not content:
+                return False
+            if len(content) > self.noisy_chunk_max_len:
+                return True
+            words = re.findall(r"\b[A-Za-z]{3,}\b", content)
+            if len(words) > 2000:
+                return True
+            return False
+        except Exception:
+            return False
 
     def _find_matching_chunk(
         self,
@@ -252,11 +300,11 @@ class Validator(AbstractValidator):
         ttitle_clean: str,
         chunk_by_id: Dict[str, int],
         chunk_titles: List[Tuple[int, Chunk, str]],
-        used_chunk_idxs: set,
+        used_chunk_idxs: Set[int],
         prefer_section_id: bool,
         fuzzy_threshold: float,
     ) -> Optional[int]:
-        """Find the best matching chunk index for a ToC entry id/title."""
+        """Find best matching chunk index for a ToC entry using section_id or fuzzy title matching."""
         if prefer_section_id and tid in chunk_by_id:
             ci = chunk_by_id[tid]
             if ci not in used_chunk_idxs:
@@ -268,7 +316,7 @@ class Validator(AbstractValidator):
         for i, _, ltitle in chunk_titles:
             if i in used_chunk_idxs:
                 continue
-            score = lev_ratio(ttitle_l, ltitle)
+            score = _lev_ratio(ttitle_l, ltitle)
             if score > best_score:
                 best_i, best_score = i, score
         if best_i is not None and best_score >= fuzzy_threshold:
@@ -287,22 +335,21 @@ class Validator(AbstractValidator):
            (missing_labels, extra_labels, out_of_order_labels, matched_labels)
         """
         chunk_by_id: Dict[str, int] = {
-            norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id
+            _norm_id(c.section_id): i for i, c in enumerate(chunks) if c.section_id
         }
 
-
         chunk_titles: List[Tuple[int, Chunk, str]] = [
-            (i, c, self.clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)
+            (i, c, self._clean_toc_title(c.title).lower()) for i, c in enumerate(chunks)
         ]
 
-        used_chunk_idxs: set = set()
+        used_chunk_idxs: Set[int] = set()
         matched_labels: List[str] = []
         matched_idx: List[Optional[int]] = []
         missing_labels: List[str] = []
 
         for t in toc:
-            tid = norm_id(t.section_id)
-            ttitle_clean = self.clean_toc_title(t.title)
+            tid = _norm_id(t.section_id)
+            ttitle_clean = self._clean_toc_title(t.title)
             chunk_i = self._find_matching_chunk(
                 tid,
                 ttitle_clean,
@@ -320,13 +367,11 @@ class Validator(AbstractValidator):
                 missing_labels.append(f"{t.section_id} {ttitle_clean}")
                 matched_idx.append(None)
 
-
         extra_labels = [
-            f"{c.section_id} {self.clean_toc_title(c.title)}"
+            f"{c.section_id} {self._clean_toc_title(c.title)}"
             for i, c in enumerate(chunks)
             if i not in used_chunk_idxs
         ]
-
 
         out_of_order_labels: List[str] = []
         last_idx = -1
@@ -346,13 +391,12 @@ class Validator(AbstractValidator):
         )
         return missing_labels, extra_labels, out_of_order_labels, matched_labels
 
-
     def _prepare_report_dict(self, report: ValidationReport) -> Dict[str, Any]:
         """Prepare a serializable dict from a ValidationReport for JSON output."""
         return report.model_dump()
 
     def write_report(self, out_path: str, report: ValidationReport) -> None:
-        """Write the validation report to JSON and print a summary table to the console."""
+        """Write the validation report to JSON and print a concise summary to console."""
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         data = self._prepare_report_dict(report)
 
@@ -365,7 +409,6 @@ class Validator(AbstractValidator):
 
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-
 
         table = Table(title="Validation Summary")
         table.add_column("Metric")
@@ -398,6 +441,3 @@ def match_sections(
 ):
     return _validator.match_sections(toc, chunks, fuzzy_threshold, prefer_section_id)
 
-
-def write_report(out_path: str, report: ValidationReport):
-    return _validator.write_report(out_path, report)
