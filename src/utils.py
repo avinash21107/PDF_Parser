@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 """
@@ -5,22 +6,18 @@ utils.py
 
 PDF utilities for normalization, ToC detection, and page extraction.
 
-Changes in this refactor:
-- Added AbstractPDFUtils (abc.ABC) to show Abstraction.
-- PDFUtils now inherits from AbstractPDFUtils (Inheritance).
-- Internal helpers are prefixed with '_' and many things are encapsulated.
-- __str__ and __eq__ implemented for simple polymorphic behavior.
-- Added a streaming line iterator to avoid building huge lists in memory.
-- Kept all previous procedural wrapper functions for backward compatibility.
+Refactor notes:
+- Lazy-import heavy PDF libraries (pdfplumber, fitz / PyMuPDF) to avoid import-time failures.
+- Added clearer docstrings and error logging.
+- Preserved public API and function names for backward compatibility.
+- Kept an abstract contract + concrete PDFUtils implementation.
 """
 
 from abc import ABC, abstractmethod
 import io
 import re
-from typing import Generator, List, Optional, Tuple
-
-import pdfplumber
-import fitz
+import importlib
+from typing import Generator, List, Optional, Tuple, Iterable, Dict, Any
 
 from src.logger import get_logger
 
@@ -30,7 +27,7 @@ LOG = get_logger(__name__)
 class AbstractPDFUtils(ABC):
     """Abstract contract for PDF utilities."""
 
-    LIGATURES: dict[str, str]
+    LIGATURES: Dict[str, str]
     TOC_START_PAT: re.Pattern
     LIST_STOP_PAT: re.Pattern
     HEADING_RE: re.Pattern
@@ -90,7 +87,6 @@ class PDFUtils(AbstractPDFUtils):
     DASH_RX = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 
     def __init__(self) -> None:
-      
         pass
 
     def __str__(self) -> str:
@@ -99,17 +95,16 @@ class PDFUtils(AbstractPDFUtils):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PDFUtils):
             return NotImplemented
-        
+
         return (
             self.TOC_START_PAT.pattern == other.TOC_START_PAT.pattern
             and self.LIST_STOP_PAT.pattern == other.LIST_STOP_PAT.pattern
         )
 
     def normalize_text(self, s: str) -> str:
-        """Replace ligatures and normalize spaces."""
+        """Replace ligatures and normalize spaces and dash/nbsp variants."""
         if not s:
             return ""
-        # normalize NBSP/dash variants early
         s = self.NBSP_RX.sub(" ", s)
         s = self.DASH_RX.sub("-", s)
         for k, v in self.LIGATURES.items():
@@ -118,20 +113,27 @@ class PDFUtils(AbstractPDFUtils):
         return s.strip()
 
     def strip_dot_leaders(self, s: str) -> str:
+        """Replace long dot leader runs with a single space."""
         return self.DOT_LEADERS_RX.sub(" ", s or "")
 
     def autodetect_toc_range(self, pdf_path: str) -> Optional[Tuple[int, int]]:
         """Detect start/end pages of the Table of Contents in a PDF.
 
         Returns 1-based page numbers (start, end) or None if not found.
+        This method lazy-imports pdfplumber and returns None (logged) if unavailable.
         """
         pdf_path = str(pdf_path)
+        pdfplumber = _lazy_import("pdfplumber")
+        if pdfplumber is None:
+            LOG.warning("pdfplumber not installed; autodetect_toc_range unavailable")
+            return None
+
         LOG.debug("Autodetecting ToC range in %s", pdf_path)
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 n = len(pdf.pages)
                 start: Optional[int] = None
-                # search first N pages for ToC start marker
+                # limit search to first 30 pages for performance
                 for i in range(min(n, 30)):
                     txt = pdf.pages[i].extract_text() or ""
                     if self.TOC_START_PAT.search(self.normalize_text(txt)):
@@ -143,7 +145,6 @@ class PDFUtils(AbstractPDFUtils):
                     return None
 
                 end: Optional[int] = None
-                
                 for p in range(start + 1, min(start + 12, n) + 1):
                     txt = pdf.pages[p - 1].extract_text() or ""
                     if self.LIST_STOP_PAT.search(self.normalize_text(txt)):
@@ -172,8 +173,14 @@ class PDFUtils(AbstractPDFUtils):
     ) -> Generator[str, None, None]:
         """Yield text lines from pages start..end (inclusive) as a streaming generator.
 
-        This avoids building large intermediate lists for big PDFs.
+        Uses pdfplumber (lazy import). If pdfplumber is unavailable, yields nothing.
         """
+        pdfplumber = _lazy_import("pdfplumber")
+        if pdfplumber is None:
+            LOG.warning("pdfplumber not installed; extract_text_lines unavailable")
+            return
+            yield
+
         pdf_path = str(pdf_path)
         try:
             with pdfplumber.open(pdf_path) as pdf:
@@ -187,11 +194,7 @@ class PDFUtils(AbstractPDFUtils):
                         yield line
         except Exception as exc:
             LOG.exception(
-                "Error iterating lines for %s pages %d-%d: %s",
-                pdf_path,
-                start,
-                end,
-                exc,
+                "Error iterating lines for %s pages %d-%d: %s", pdf_path, start, end, exc
             )
 
     def extract_text_lines(self, pdf_path: str, start: int, end: int) -> List[str]:
@@ -202,15 +205,23 @@ class PDFUtils(AbstractPDFUtils):
         return lines
 
     def extract_all_pages(self, pdf_path: str) -> List[Tuple[int, str]]:
-        """Extract all pages from a PDF as a list of (page_number, text) tuples."""
+        """Extract all pages from a PDF as a list of (page_number, text) tuples.
+
+        This uses PyMuPDF (fitz). If fitz isn't available, returns [] and logs a warning.
+        """
+        pdf_path = str(pdf_path)
+        fitz = _lazy_import("fitz")  # PyMuPDF
+        if fitz is None:
+            LOG.warning("PyMuPDF (fitz) not installed; extract_all_pages unavailable")
+            return []
+
         LOG.debug("Extracting all pages from %s using PyMuPDF", pdf_path)
         pages: List[Tuple[int, str]] = []
         try:
-            with fitz.open(str(pdf_path)) as doc:
+            with fitz.open(pdf_path) as doc:
                 for page_no, page in enumerate(doc, start=1):
-                    
                     blocks = page.get_text("blocks")
-                    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  
+                    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  # sort top-down
                     text = "\n".join(b[4] for b in blocks if b[4].strip())
                     pages.append((page_no, text))
         except Exception as exc:
@@ -233,10 +244,16 @@ class PDFUtils(AbstractPDFUtils):
             return False
         return True
 
-
-
 _utils: AbstractPDFUtils = PDFUtils()
 
+
+def _lazy_import(name: str) -> Optional[Any]:
+    """Attempt to import a module by name and return it, or None if unavailable."""
+    try:
+        return importlib.import_module(name)
+    except Exception as exc:
+        LOG.debug("Lazy import failed for %s: %s", name, exc)
+        return None
 
 def normalize_text(s: str) -> str:
     try:
@@ -247,7 +264,11 @@ def normalize_text(s: str) -> str:
 
 
 def strip_dot_leaders(s: str) -> str:
-    return _utils.strip_dot_leaders(s)
+    try:
+        return _utils.strip_dot_leaders(s)
+    except Exception as e:
+        LOG.error("strip_dot_leaders failed: %s", e, exc_info=True)
+        return ""
 
 
 def autodetect_toc_range(pdf_path: str) -> Optional[Tuple[int, int]]:
@@ -263,7 +284,11 @@ def parse_page_range(s: str) -> Tuple[int, int]:
 
 
 def extract_text_lines(pdf_path: str, start: int, end: int) -> List[str]:
-    return _utils.extract_text_lines(pdf_path, start, end)
+    try:
+        return _utils.extract_text_lines(pdf_path, start, end)
+    except Exception as e:
+        LOG.error("extract_text_lines failed for %s pages %s-%s: %s", pdf_path, start, end, e, exc_info=True)
+        return []
 
 
 def extract_all_pages(pdf_path: str) -> List[Tuple[int, str]]:
@@ -275,5 +300,8 @@ def extract_all_pages(pdf_path: str) -> List[Tuple[int, str]]:
 
 
 def looks_like_heading(num: str, title: str) -> bool:
-    return _utils.looks_like_heading(num, title)
-
+    try:
+        return _utils.looks_like_heading(num, title)
+    except Exception as e:
+        LOG.error("looks_like_heading failed: %s", e, exc_info=True)
+        return False
