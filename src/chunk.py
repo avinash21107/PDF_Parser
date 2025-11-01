@@ -1,23 +1,15 @@
 from __future__ import annotations
-
 import json
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import (
-    Dict,
-    List,
-    Optional,
-    Set,
-    Tuple,
-)
+from typing import Dict, List, Optional, Set, Tuple
 
 from src.models import Caption, Chunk, ToCEntry
 from src.utils import looks_like_heading, normalize_text, strip_dot_leaders
 
-
 class PDFRegexes:
-    """Encapsulate PDF-related regex patterns used throughout the module."""
+    """Encapsulate all PDF-related regex patterns."""
 
     SEP = r"[.\:\-\u2010\u2011\u2012\u2013\u2014\u2212]"
     ID = r"(?:(?:\d+|[A-Z])(?:\.\d+)*[a-z]?)"
@@ -39,13 +31,14 @@ class PDFRegexes:
         r"Universal Serial Bus Power Delivery Specification", re.IGNORECASE
     )
     TABLE_FIGURE_LOOKAHEAD = r"(?=(?:\s*[A-Z]\.)|\s*\d)"
-
-
-    HEADING_RE = re.compile(r"^\s*(?P<num>(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\s+(?P<title>.+?)\s*$")
+    HEADING_RE = re.compile(
+        r"^\s*(?P<num>(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*))\s+(?P<title>.+?)\s*$"
+    )
+    BULLET_CHARS = ("", "", "●", "▪", "", "", "", "•")
 
 
 class AbstractCleaner(ABC):
-    """Contract for cleaning/normalization logic."""
+    """Contract for text cleaning/normalization."""
 
     @abstractmethod
     def norm_caption_line(self, s: str) -> str:
@@ -67,7 +60,6 @@ class AbstractCleaner(ABC):
     def normalize_sentences(self, text: str) -> str:
         raise NotImplementedError
 
-
 class Cleaner(AbstractCleaner):
     """Text cleaning utilities used when building chunks."""
 
@@ -83,10 +75,8 @@ class Cleaner(AbstractCleaner):
     def norm_caption_line(self, s: str) -> str:
         s = self.regex.NBSP_FIX.sub(" ", s)
         s = self.regex.DASH_NORMALIZE.sub("-", s)
-
         s = re.sub(r"(?i)\bT\s*a\s*b\s*l\s*e\b", "Table", s)
         s = re.sub(r"(?i)\bF\s*i\s*g\s*u\s*r\s*e\b", "Figure", s)
-
         s = re.sub(rf"(?i)(Table){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = re.sub(rf"(?i)(Figure){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = self.regex.MULTI_SPACE_RE.sub(" ", s).strip()
@@ -94,27 +84,20 @@ class Cleaner(AbstractCleaner):
 
     def looks_like_running_header_noisy(self, s: str) -> bool:
         norm = re.sub(r"[\s.\-·•_]", "", s).lower()
-        return (
-            "universalserialbuspowerdeliveryspecification" in norm
-            or "revision32" in norm
-            or "version11" in norm
+        return any(
+            term in norm for term in ("universalserialbuspowerdeliveryspecification", "revision32", "version11")
         )
 
     def clean_content(self, text: str) -> str:
-        """Normalize PDF-extracted page content into readable chunk content."""
+        """Normalize PDF-extracted page content."""
         if not text:
             return ""
-
-
-        for b in ("", "", "●", "▪", "", "", "", "•"):
+        for b in self.regex.BULLET_CHARS:
             text = text.replace(b, "- ")
-
         text = re.sub(r"(\S)-\n([a-z])", r"\1\2", text)
-        text = re.sub(r"(\S)[\-\u2010\u2011\u2012\u2013\u2014\u2212]\n(\S)", r"\1 \2", text)
+        text = re.sub(r"(\S)[\-\u2010-\u2014\u2212]\n(\S)", r"\1 \2", text)
         text = text.replace('\\"', '"').replace("\\'", "'")
         text = re.sub(r"(?<!\w)/(?!\w)", "", text)
-
-        # Add space between camelCase-like joins
         text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
         text = re.sub(r'\s*"([^"]+)"\s*', r' "\1" ', text)
 
@@ -126,7 +109,6 @@ class Cleaner(AbstractCleaner):
             s = PDFRegexes.MULTI_SPACE_RE.sub(" ", s).strip()
             if s:
                 cleaned_lines.append(s)
-
         return "\n".join(cleaned_lines).strip()
 
     def clean_heading_title(self, title: str) -> str:
@@ -160,17 +142,14 @@ class HeadingDetector:
         return f"HeadingDetector(cleaner={self.cleaner})"
 
     def _heading_is_noisy(self, line: str, title: str) -> bool:
-        for pat in self.noise_patterns:
-            if pat.search(title) or pat.search(line):
-                return True
+        """Return True if a heading is noisy."""
+        if any(pat.search(title) or pat.search(line) for pat in self.noise_patterns):
+            return True
         if self.cleaner.looks_like_running_header_noisy(title):
             return True
         if not re.search(r"[A-Za-z]", title):
             return True
-        # reuse existing heuristic
-        if not looks_like_heading(num=title, title=title):
-            return True
-        return False
+        return not looks_like_heading(num=title, title=title)
 
     def extract_heading(
         self,
@@ -217,20 +196,13 @@ class AbstractChunkBuilder(ABC):
 
     @abstractmethod
     def build_chunks_from_toc(
-        self,
-        pages: List[Tuple[int, str]],
-        toc_entries: List[ToCEntry],
-        skip_pages: Optional[Set[int]] = None,
+        self, pages: List[Tuple[int, str]], toc_entries: List[ToCEntry], skip_pages: Optional[Set[int]] = None
     ) -> List[Chunk]:
         raise NotImplementedError
 
     @abstractmethod
     def build_chunks(
-        self,
-        pages: List[Tuple[int, str]],
-        toc_ids: Optional[Set[str]] = None,
-        skip_pages: Optional[Set[int]] = None,
-        toc_map: Optional[Dict[str, str]] = None,
+        self, pages: List[Tuple[int, str]], toc_ids: Optional[Set[str]] = None, skip_pages: Optional[Set[int]] = None, toc_map: Optional[Dict[str, str]] = None
     ) -> List[Chunk]:
         raise NotImplementedError
 
@@ -253,13 +225,12 @@ class ChunkBuilder(AbstractChunkBuilder):
     def __str__(self) -> str:
         return f"ChunkBuilder(cleaner={self.cleaner}, detector={self.detector})"
 
+
     def _filter_content_line(self, line: str) -> bool:
-        """Decide whether a line should be included in chunk content."""
         s = line.strip()
         if re.search(r"\b(Table|Figure)\b", s, re.IGNORECASE):
             return True
         if re.match(r"^\d+(?:\.\d+)*\s+.+", s):
-
             return False
         if PDFRegexes.USB_SPEC_PATTERN.search(s):
             return False
@@ -267,14 +238,21 @@ class ChunkBuilder(AbstractChunkBuilder):
             return False
         return True
 
-    def _build_chunk(
-        self,
-        lines: List[str],
-        section_id: str,
-        title: str,
-        pstart: int,
-        pend: int,
-    ) -> Chunk:
+    def _lines_for_page_range(
+        self, page_map: Dict[int, str], pstart: int, pend: int, skip_pages: Set[int]
+    ) -> List[str]:
+        """Gather filtered lines across a page range."""
+        lines: List[str] = []
+        for p in range(pstart, pend + 1):
+            if p in skip_pages:
+                continue
+            page_text = page_map.get(p, "")
+            for line in page_text.splitlines():
+                if self._filter_content_line(line):
+                    lines.append(line)
+        return lines
+
+    def _build_chunk(self, lines: List[str], section_id: str, title: str, pstart: int, pend: int) -> Chunk:
         content = self.cleaner.clean_content("\n".join(lines))
         return Chunk(
             section_path=f"{section_id} {title}",
@@ -286,22 +264,18 @@ class ChunkBuilder(AbstractChunkBuilder):
             figures=[],
         )
 
-    def _lines_for_page_range(
-        self, page_map: Dict[int, str], pstart: int, pend: int, skip_pages: Set[int]
-    ) -> List[str]:
-        """Gather and filter lines across a page range."""
-        lines: List[str] = []
-        for p in range(pstart, pend + 1):
-            if p in skip_pages:
-                continue
-            page_text = page_map.get(p, "")
-            for line in page_text.splitlines():
-                if self._filter_content_line(line):
-                    lines.append(line)
-        return lines
+    def _build_chunks_from_bounds(self, bounds: List[Tuple[int, int, str, str]], page_map: Dict[int, str], skip_pages: Set[int]) -> List[Chunk]:
+        """Common logic to build chunks from bounds."""
+        chunks = []
+        for pstart, pend, sec, title in bounds:
+            lines = self._lines_for_page_range(page_map, pstart, pend, skip_pages)
+            chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
+        self.enrich_with_figures_tables(chunks)
+        for ch in chunks:
+            ch.content = self.cleaner.normalize_sentences(ch.content)
+        return chunks
 
     def enrich_with_figures_tables(self, chunks: List[Chunk]) -> None:
-        """Populate Chunk.figures and Chunk.tables by scanning content for captions."""
         for ch in chunks:
             ch.figures = []
             ch.tables = []
@@ -316,12 +290,8 @@ class ChunkBuilder(AbstractChunkBuilder):
                     ch.tables.append(Caption(id=m.group(1)))
 
     def build_chunks_from_toc(
-        self,
-        pages: List[Tuple[int, str]],
-        toc_entries: List[ToCEntry],
-        skip_pages: Optional[Set[int]] = None,
+        self, pages: List[Tuple[int, str]], toc_entries: List[ToCEntry], skip_pages: Optional[Set[int]] = None
     ) -> List[Chunk]:
-        """Build chunks by slicing PDF pages according to ToC entries."""
         skip_pages = skip_pages or set()
         page_map = dict(pages)
         entries_sorted = sorted(toc_entries, key=lambda e: e.page)
@@ -330,73 +300,37 @@ class ChunkBuilder(AbstractChunkBuilder):
         bounds: List[Tuple[int, int, str, str]] = []
         for i, e in enumerate(entries_sorted):
             pstart = e.page
-            pend = (
-                entries_sorted[i + 1].page - 1
-                if i + 1 < len(entries_sorted)
-                else last_pdf_page
-            )
+            pend = entries_sorted[i + 1].page - 1 if i + 1 < len(entries_sorted) else last_pdf_page
             pend = max(pstart, pend)
             bounds.append((pstart, pend, e.section_id, e.title))
 
-        chunks: List[Chunk] = []
-        for pstart, pend, sec, title in bounds:
-            lines = self._lines_for_page_range(page_map, pstart, pend, skip_pages)
-            chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
-
-        self.enrich_with_figures_tables(chunks)
-        for ch in chunks:
-            ch.content = self.cleaner.normalize_sentences(ch.content)
-
-        return chunks
+        return self._build_chunks_from_bounds(bounds, page_map, skip_pages)
 
     def build_chunks(
-        self,
-        pages: List[Tuple[int, str]],
-        toc_ids: Optional[Set[str]] = None,
-        skip_pages: Optional[Set[int]] = None,
-        toc_map: Optional[Dict[str, str]] = None,
+        self, pages: List[Tuple[int, str]], toc_ids: Optional[Set[str]] = None, skip_pages: Optional[Set[int]] = None, toc_map: Optional[Dict[str, str]] = None
     ) -> List[Chunk]:
-        """Build chunks by detecting headings in the pages and slicing around those headings."""
         skip_pages = skip_pages or set()
-        heads = self.detector.detect_headings(
-            pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map
-        )
+        heads = self.detector.detect_headings(pages, toc_ids=toc_ids, skip_pages=skip_pages, toc_map=toc_map)
         if not heads:
             return []
 
         last_page = pages[-1][0]
-
-        heads_sorted = sorted(
-            heads, key=lambda x: (tuple(int(p) for p in x[1].split(".")), x[0])
-        )
+        heads_sorted = sorted(heads, key=lambda x: (tuple(int(p) for p in x[1].split(".")), x[0]))
 
         bounds: List[Tuple[int, int, str, str]] = []
         for i, (pno, sec, title) in enumerate(heads_sorted):
-            next_p = (
-                heads_sorted[i + 1][0] if i + 1 < len(heads_sorted) else last_page + 1
-            )
+            next_p = heads_sorted[i + 1][0] if i + 1 < len(heads_sorted) else last_page + 1
             bounds.append((pno, next_p - 1, sec, title))
 
         page_map = dict(pages)
-        chunks: List[Chunk] = []
-        for pstart, pend, sec, title in bounds:
-            lines = self._lines_for_page_range(page_map, pstart, pend, skip_pages)
-            chunks.append(self._build_chunk(lines, sec, title, pstart, pend))
-
-        self.enrich_with_figures_tables(chunks)
-        for ch in chunks:
-            ch.content = self.cleaner.normalize_sentences(ch.content)
-
-        return chunks
+        return self._build_chunks_from_bounds(bounds, page_map, skip_pages)
 
     def write_jsonl(self, chunks: List[Chunk], out_path: str) -> int:
-        """Write chunks to a JSONL file. Page ranges are converted to lists when possible."""
         out_file = Path(out_path)
         out_file.parent.mkdir(parents=True, exist_ok=True)
         count = 0
         with out_file.open("w", encoding="utf-8") as fh:
             for c in chunks:
-                # Safely parse page_range "start,end" into a list of ints when possible
                 pr_list: List[int] = []
                 try:
                     parts = [p.strip() for p in (c.page_range or "").split(",") if p.strip()]
@@ -415,6 +349,7 @@ class ChunkBuilder(AbstractChunkBuilder):
                 fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
                 count += 1
         return count
+
 
 _cleaner: AbstractCleaner = Cleaner()
 _detector = HeadingDetector(_cleaner)
@@ -448,10 +383,5 @@ def build_chunks(
     )
 
 
-def normalize_sentences(text: str) -> str:
-    return _cleaner.normalize_sentences(text)
-
-
 def write_jsonl(chunks: List[Chunk], out_path: str) -> int:
     return _builder.write_jsonl(chunks, out_path)
-
