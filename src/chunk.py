@@ -8,10 +8,11 @@ from typing import Dict, List, Optional, Set, Tuple
 from src.models import Caption, Chunk, ToCEntry
 from src.utils import looks_like_heading, normalize_text, strip_dot_leaders
 
+
 class PDFRegexes:
     """Encapsulate all PDF-related regex patterns."""
 
-    SEP = r"[.\:\-\u2010\u2011\u2012\u2013\u2014\u2212]"
+    SEP = r"[.:\-\u2010\u2011\u2012\u2013\u2014\u2212]"
     ID = r"(?:(?:\d+|[A-Z])(?:\.\d+)*[a-z]?)"
     CAPTION_SEP = r"(?:\s*[:.\-–—]?\s*)"
 
@@ -60,6 +61,7 @@ class AbstractCleaner(ABC):
     def normalize_sentences(self, text: str) -> str:
         raise NotImplementedError
 
+
 class Cleaner(AbstractCleaner):
     """Text cleaning utilities used when building chunks."""
 
@@ -77,6 +79,7 @@ class Cleaner(AbstractCleaner):
         s = self.regex.DASH_NORMALIZE.sub("-", s)
         s = re.sub(r"(?i)\bT\s*a\s*b\s*l\s*e\b", "Table", s)
         s = re.sub(r"(?i)\bF\s*i\s*g\s*u\s*r\s*e\b", "Figure", s)
+        # Use lookahead constant from PDFRegexes
         s = re.sub(rf"(?i)(Table){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = re.sub(rf"(?i)(Figure){PDFRegexes.TABLE_FIGURE_LOOKAHEAD}", r"\1 ", s)
         s = self.regex.MULTI_SPACE_RE.sub(" ", s).strip()
@@ -94,10 +97,13 @@ class Cleaner(AbstractCleaner):
             return ""
         for b in self.regex.BULLET_CHARS:
             text = text.replace(b, "- ")
+        # Join hyphen-split words across linebreaks
         text = re.sub(r"(\S)-\n([a-z])", r"\1\2", text)
+        # Replace hyphen+linebreak between words with a space
         text = re.sub(r"(\S)[\-\u2010-\u2014\u2212]\n(\S)", r"\1 \2", text)
         text = text.replace('\\"', '"').replace("\\'", "'")
         text = re.sub(r"(?<!\w)/(?!\w)", "", text)
+        # CamelCase separation heuristics
         text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
         text = re.sub(r'\s*"([^"]+)"\s*', r' "\1" ', text)
 
@@ -139,7 +145,7 @@ class HeadingDetector:
         ]
 
     def __str__(self) -> str:
-        return f"HeadingDetector(cleaner={self.cleaner})"
+        return f"HeadingDetector(cleaner={self.cleaner!r})"
 
     def _heading_is_noisy(self, line: str, title: str) -> bool:
         """Return True if a heading is noisy."""
@@ -223,15 +229,22 @@ class ChunkBuilder(AbstractChunkBuilder):
         self.detector = detector
 
     def __str__(self) -> str:
-        return f"ChunkBuilder(cleaner={self.cleaner}, detector={self.detector})"
-
+        return f"ChunkBuilder(cleaner={self.cleaner!r}, detector={self.detector!r})"
 
     def _filter_content_line(self, line: str) -> bool:
         s = line.strip()
+        # Always keep explicit Table/Figure caption lines
         if re.search(r"\b(Table|Figure)\b", s, re.IGNORECASE):
             return True
+
+        # Heuristic for pure heading-only lines:
+        # - If the line looks like a heading AND it is short and contains no sentence punctuation,
+        #   treat it as a heading-only line and exclude it from body content.
+        # - Otherwise keep the line (this allows "2 Overview This section ..." lines).
         if re.match(r"^\d+(?:\.\d+)*\s+.+", s):
-            return False
+            if len(s) < 120 and not re.search(r"[.!?;:—-]", s):
+                return False
+
         if PDFRegexes.USB_SPEC_PATTERN.search(s):
             return False
         if re.match(r"^Page\s+\d+\s*$", s, re.I):
@@ -315,7 +328,17 @@ class ChunkBuilder(AbstractChunkBuilder):
             return []
 
         last_page = pages[-1][0]
-        heads_sorted = sorted(heads, key=lambda x: (tuple(int(p) for p in x[1].split(".")), x[0]))
+
+        # sort by numeric section path (e.g., 2.1 before 10)
+        def _section_key(item: Tuple[int, str, str]) -> Tuple[Tuple[int, ...], int]:
+            pno, sec, _ = item
+            try:
+                key = tuple(int(x) for x in sec.split("."))
+            except Exception:
+                key = (0,)
+            return key, pno
+
+        heads_sorted = sorted(heads, key=_section_key)
 
         bounds: List[Tuple[int, int, str, str]] = []
         for i, (pno, sec, title) in enumerate(heads_sorted):
